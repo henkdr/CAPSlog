@@ -10,7 +10,7 @@ try:
 except:
     pass
     
-VARUNA_TEMP_FOLDER = "/tmp/varuna"
+VARUNA_TEMP_FOLDER = "/home/als271/tmp_varuna"
 HEARTBEAT_IP_ENV_VAR = "VARUNA_MANAGER_IP"
 HEARTBEAT_PORT_ENV_VAR = "VARUNA_HEARTBEAT_PORT"
 MORPH_PORT_ENV_VAR = "VARUNA_MORPH_PORT"
@@ -126,6 +126,17 @@ def parse_stage_to_rank_map(stage_to_rank_map_str):
         ranks = stage_ranks[i].split(",")
         stage_to_rank_map[int(i)] = [int(r) for r in ranks]
     return stage_to_rank_map
+
+def parse_stage_to_cut(stage_to_cut_str):
+    """ parses the stage_to_cut string recieved from varuna launcher """
+    stage_cuts = stage_to_cut_str.split(",")
+    stages = len(stage_cuts)
+    stage_to_cut = []
+    for i in range(stages):
+        stage_to_cut.append(int(stage_cuts[i]))
+    # print(f"received string: {stage_to_cut_str} \n parsed mapping: {stage_to_cut}") 
+    return stage_to_cut
+
 
 def get_varuna_config(stage_to_rank_map_str):
     """ parses the stage_to_rank_map string recieved from varuna launcher to

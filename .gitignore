@@ -25,6 +25,7 @@ Megatron-LM/*.sh
 varuna.env
 varuna_current_machines
 all_machines
+ssh_logs/
 
 varuna/genschedule
 varuna/apex/

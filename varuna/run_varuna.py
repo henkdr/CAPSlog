@@ -1,4 +1,3 @@
-
 import os, subprocess
 from argparse import ArgumentParser, REMAINDER
 import socket, time
@@ -6,7 +5,7 @@ import sys
 
 from .utils import HEARTBEAT_IP_ENV_VAR, HEARTBEAT_PORT_ENV_VAR, VARUNA_TEMP_FOLDER, MORPH_PORT_ENV_VAR
 
-HEARTBEAT_PORT = 5000 
+HEARTBEAT_PORT = 5000
 MORPH_PORT = 4200
 
 # TODO: readme/docs for launch process
@@ -53,6 +52,8 @@ def get_launch_cmd_format(args):
         +  " --node_rank {} --nservers {} --master_addr {}"
         +  f" --nstages {args.nstages} --batch_size {args.batch_size}" \
         +  f" --chunk_size {args.chunk_size} --code_dir {args.code_dir}")
+    if args.stage_to_cut is not None:
+        launch_cmd.append(f"--stage_to_cut {args.stage_to_cut}")
     launch_cmd.append(args.training_script)
     launch_cmd.extend(args.training_script_args)
     launch_cmd = " ".join(launch_cmd)
@@ -76,7 +77,7 @@ def parse_args():
                                         "helper utilty that will spawn up "
                                         "multiple distributed processes")
     parser.add_argument("--machine_list", type=str, default="available_machines.out",
-                            help = "path to a file with reachable IPs written line-wise." 
+                            help = "path to a file with reachable IPs written line-wise."
                             "These should be available to ssh into through the manager ")
     parser.add_argument("--gpus_per_node", type=int, default=4,
                             help = "number of GPUs per machine")
@@ -98,8 +99,10 @@ def parse_args():
     parser.add_argument("--code_dir", default=None, type=str,
                         help="Path on all machines of directory to run training in."
                         "Defaults to path from which launched.")
-    parser.add_argument("--resume", action="store_true", 
+    parser.add_argument("--resume", action="store_true",
                         help="Resume a varuna run.")
+    parser.add_argument("--stage_to_cut", default=None, type=str,
+                        help = "stage to cutpoint map of Varuna model")
 
     parser.add_argument("training_script", type=str, default=None, nargs='?',
                         help="The full path to the single GPU training "
@@ -118,11 +121,11 @@ if __name__ == "__main__":
     with open(args.machine_list, "r") as f:
         content = f.read()
         reachable_machines = content.split("\n")
-        reachable_machines = [m for m in reachable_machines if len(m) > 0]  
+        reachable_machines = [m for m in reachable_machines if len(m) > 0]
         with open(running_machines_list, "w") as of:
             of.write(content)
-    print(reachable_machines)  
-    
+    print(reachable_machines)
+
     reachable_count = len(reachable_machines)
     if reachable_count == 0:
         print("Empty machine list, nothing to run!")
@@ -135,7 +138,7 @@ if __name__ == "__main__":
         args.code_dir = os.getcwd()
     if args.manager_ip is None:
         args.manager_ip = socket.gethostbyname(socket.gethostname())
-        
+
     if not args.no_morphing:
         if not args.resume:
             kill_morph_listeners()
@@ -161,12 +164,13 @@ if __name__ == "__main__":
     current_env[HEARTBEAT_PORT_ENV_VAR] = str(HEARTBEAT_PORT)
     current_env[MORPH_PORT_ENV_VAR] = str(MORPH_PORT)
    # current_env["PATH"] = "PATH=\"/home/varuna/anaconda3/bin:$PATH\""
-    
+
+    processes = []
     for i,machine in enumerate(reachable_machines):
         launch_cmd = launch_cmd_format.format(i, reachable_count, master_addr)
-        out_file = open(f"ssh_logs/ssh_out_{i}", "w")
-        err_file = open(f"ssh_logs/ssh_err_{i}", "w")
-        
+        out_file = open(f"ssh_logs/ssh_out_node{i}", "w")
+        err_file = open(f"ssh_logs/ssh_err_node{i}", "w")
+
         if machine == "127.0.0.1":
             cmd = launch_cmd.split(" ")
             cmd = [x_ for x_ in cmd if x_ != ""]
@@ -174,13 +178,21 @@ if __name__ == "__main__":
         else:
             cmd = ["ssh"]
             cmd.append(machine)
-            cmd.append(f"echo \"{launch_cmd}\" > launch_varuna.sh; ")
-            cmd.append(f"{HEARTBEAT_IP_ENV_VAR}={args.manager_ip}") 
+            cmd.append(f"echo \"{launch_cmd}\" > launch_varuna_{i}.sh; chmod 755 launch_varuna_{i}.sh; ")
+            cmd.append(f"conda activate varuna; module load cuda11.7/toolkit; ")
+            cmd.append(f"{HEARTBEAT_IP_ENV_VAR}={args.manager_ip}")
             cmd.append(f"{MORPH_PORT_ENV_VAR}={MORPH_PORT} {HEARTBEAT_PORT_ENV_VAR}={HEARTBEAT_PORT}")
             cmd.append(get_env_vars(args.env_file))
-            cmd.append("bash launch_varuna.sh")
+            cmd.append(f"bash launch_varuna_{i}.sh")
+            #cmd.append("bash /tmp/launch_varuna.sh")
             print(" ".join(cmd ))
-       
-        process = subprocess.Popen(cmd, env=current_env, 
+
+        process = subprocess.Popen(cmd, env=current_env,
                                     stdout=out_file,
                                     stderr=err_file)
+        print("process", process)
+        processes.append(process)
+    for process in processes:
+        print("wait for process", process)
+        status = process.wait()
+        print("status", status)

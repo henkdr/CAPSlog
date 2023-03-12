@@ -581,8 +581,9 @@ class Profiler:
                 else:
                     raise e
             
-            for param in optimizer._amp_stash.all_fp32_from_fp16_params:
-                param.grad = None
+            # BAZI: COMMENTED THIS OUT !!
+            # for param in optimizer._amp_stash.all_fp32_from_fp16_params:
+            #     param.grad = None
             for param in self.model.parameters():
                 param.grad = None
 
@@ -839,8 +840,9 @@ class Profiler:
             fwd_out, bwd_start, bwd_end = self.profile_bwd(fwd_out, batch_size, optimizer) 
 
             optimizer.step()
-            for param in optimizer._amp_stash.all_fp32_from_fp16_params:
-                param.grad = None
+            # BAZI COMMENTED THIS OUT
+            # for param in optimizer._amp_stash.all_fp32_from_fp16_params:
+            #     param.grad = None
             for param in self.model.parameters():
                 param.grad = None
                     

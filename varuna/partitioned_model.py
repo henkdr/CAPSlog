@@ -180,7 +180,7 @@ def read_dry_run_out(model):
 
 class PartitionedModel(Module):
 
-    def __init__(self, module, rank, local_rank, device, stage_to_rank_map, fp16, shared_weights=None):
+    def __init__(self, module, rank, local_rank, device, stage_to_rank_map, fp16, stage_to_cut, shared_weights=None):
         super(PartitionedModel, self).__init__()
         self.module = module
         self.num_stages = len(stage_to_rank_map)
@@ -189,7 +189,9 @@ class PartitionedModel(Module):
         self.local_rank = local_rank
         self.fp16 = fp16
         self.shared_weights = shared_weights
-        
+
+        # BAZI: added this parameter
+        self.stage_to_cut = stage_to_cut
         
         self.grads_send_queue = self.acts_send_queue = None
         self.acts_queue = self.grads_queue = None
@@ -219,6 +221,13 @@ class PartitionedModel(Module):
         # print("Initializing partitioned model!")
         start = time.time()
         self.dry_run(get_batch_fn, from_cache)
+
+        if self.stage_to_cut is None:
+            cuts_per_stage = int((self.num_cutpoints + 1)/self.num_stages)
+            self.stage_to_cut = [i for i in range(0, self.num_cutpoints, cuts_per_stage)]
+
+        print(f"Stage to cut is: {self.stage_to_cut}")
+
         if self.shared_weights is not None:
             self.find_shared_weight_stages()
         print("dry run time", time.time() - start)
@@ -343,12 +352,25 @@ class PartitionedModel(Module):
                 if hasattr(self.module, param_name):
                     weight_stages[w] = curr_stage
 
-        cuts_per_stage = (self.num_cutpoints + 1)/ self.num_stages
+        # cuts_per_stage = (self.num_cutpoints + 1)/ self.num_stages
+        # BAZI
+        stage_to_cut_ranges = []
+        for stage, cut in enumerate(self.stage_to_cut):
+            if stage == self.num_stages - 1:
+                stage_to_cut_ranges.append(range(cut, self.num_cutpoints + 1))
+            else:
+                stage_to_cut_ranges.append(range(cut, self.stage_to_cut[stage+1]))
+
         shared_weight_stages = []
         for w_pair in self.shared_weights:
             for w in w_pair:
                 assert w in weight_stages, "Shared parameter {} not found in model!".format(w)
-                weight_stages[w] = int(weight_stages[w] // cuts_per_stage)
+                cutpoint_id = weight_stages[w] 
+                for s, ranges in enumerate(stage_to_cut_ranges):
+                    if cutpoint_id in ranges:
+                        weight_stages[w] = s
+                        break
+                # weight_stages[w] = int(weight_stages[w] // cuts_per_stage)
             shared_weight_stages.append((weight_stages[w_pair[0]], weight_stages[w_pair[1]]))
 
         self.shared_weight_stages = shared_weight_stages
@@ -366,7 +388,7 @@ class PartitionedModel(Module):
             cutpoint.fp16 = self.fp16
             cutpoint.set_cp_func()
 
-        self.cuts_per_stage = (self.num_cutpoints + 1) // self.num_stages
+        # self.cuts_per_stage = (self.num_cutpoints + 1) // self.num_stages
 
         modules = self.ordered_modules
         index = 1
@@ -380,7 +402,9 @@ class PartitionedModel(Module):
             if name == "":
                 continue
             if isinstance(module, CutPoint):
-                if (index % self.cuts_per_stage == 0):
+                # if (index % self.cuts_per_stage == 0):
+                # BAZI
+                if (index in self.stage_to_cut):
                     # pre cp
                     if assigned_index == self.stage:
                         self.forward_input_shapes = self.input_shapes[name]
@@ -480,8 +504,11 @@ class PartitionedModel(Module):
 
     def check_unused_parameters(self):
 
-        start_pstage = self.cuts_per_stage * self.stage
-        end_pstage = self.cuts_per_stage * (self.stage+1)
+        # start_pstage = self.cuts_per_stage * self.stage
+        # end_pstage = self.cuts_per_stage * (self.stage+1)
+        # BAZI
+        start_pstage = self.stage_to_cut[self.stage]
+        end_pstage = self.stage_to_cut[self.stage+1] if self.stage < (self.num_stages - 1) else (self.num_cutpoints + 1)
 
         for n,p in self.module.named_parameters():
             if n not in self.param_name_to_pstage:
@@ -640,5 +667,3 @@ class PassThroughModule(Module):
 
     def forward(self,*args,**kwargs):
         return None
-
-

@@ -74,6 +74,7 @@ def calculate_config(args):
     print("chunk_size:", args.chunk_size)
     print("data depth:", gpus_per_stage)
     print("stage to rank map:", stage_to_rank_map_str)
+    print("stage to cut map:", args.stage_to_cut)
 
     return dist_world_size, stage_to_rank_map, ranks_in_server, total_batch_size, gpus_per_stage
     
@@ -132,6 +133,9 @@ def parse_args():
                         help="Directory to run training in")
     parser.add_argument("--gpus_per_stage", type=int, default = "0",
                         help="GPUs per stage (Only needed when we want to use less than ngpus_per_server * nservers)")
+    
+    parser.add_argument("--stage_to_cut", default=None, type=str,
+                        help = "stage to cutpoint map of Varuna model")
     # need a better way to pass this information ?
     # parser.add_argument("--total_num_stages", required=True, type=int,
     #                     help="The total number of potential stages/partitions the model is divided into")
@@ -207,8 +211,8 @@ if __name__ == "__main__":
 
     alias_ranks = list(range(dist_world_size))
 
-    if args.node_rank == 0:
-        send_to_manager("starting job of size {}".format(dist_world_size), manager_ip, manager_port)
+    # if args.node_rank == 0:
+    #     send_to_manager("starting job of size {}".format(dist_world_size), manager_ip, manager_port)
 
     current_env["WORLD_SIZE"] = str(dist_world_size)
     print("World size is",dist_world_size)
@@ -223,6 +227,9 @@ if __name__ == "__main__":
         stage_to_rank_map_str += (ranks + ";")
 
     for rank in ranks_in_server:
+
+        out_file = open(f"/home/als271/varuna/ssh_logs/ssh_out_gpu{rank}", "w")
+        err_file = open(f"/home/als271/varuna/ssh_logs/ssh_err_gpu{rank}", "w")
         
         local_rank = rank % args.ngpus_per_server
         rank = alias_ranks[rank]            
@@ -243,10 +250,13 @@ if __name__ == "__main__":
         cmd.append("--stage_to_rank_map={}".format(stage_to_rank_map_str))
         cmd.append("--batch-size={}".format(str(per_process_batch_size)))
 
+        if args.stage_to_cut is not None:
+            cmd.append("--stage_to_cut={}".format(str(args.stage_to_cut)))
+            
         cmd.extend(args.training_script_args)
         print(" ".join(cmd), flush=True)
 
-        process = subprocess.Popen(cmd, env=current_env,cwd=args.code_dir)
+        process = subprocess.Popen(cmd, env=current_env,cwd=args.code_dir, stdout=out_file, stderr=err_file)
         processes.append(process)
 
     # wait for all processes
@@ -262,5 +272,5 @@ if __name__ == "__main__":
 
 
     last_iter = get_last_iter(len(ranks_in_server))
-    send_to_manager("checkpoint done {}".format(last_iter), manager_ip, manager_port)
+    # send_to_manager("checkpoint done {}".format(last_iter), manager_ip, manager_port)
 

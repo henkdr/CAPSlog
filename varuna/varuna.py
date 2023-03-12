@@ -86,6 +86,7 @@ class Varuna(Module):
                 get_batch_fn,
                 batch_size,
                 chunk_size,
+                stage_to_cut,
                 fp16 = False, 
                 local_rank=-1,
                 device=-1,
@@ -103,6 +104,11 @@ class Varuna(Module):
         if self.stage == -1:
             raise ValueError("Rank " + str(self.rank) + " not found in stage to rank map!")
         self.data_parallel = self.data_depth > 1
+        
+        if stage_to_cut is not None:
+            self.stage_to_cut = utils.parse_stage_to_cut(stage_to_cut)
+        else:
+            self.stage_to_cut = None
 
         model_in_cpu = not next(model.parameters()).is_cuda
         assert model_in_cpu, "Model should be on CPU before passing to varuna!"
@@ -125,7 +131,7 @@ class Varuna(Module):
         self.shared_weights = shared_weights
 
         # partition model based on "CutPoint"s using a dry run with dummy inputs (dict)
-        self.model = PartitionedModel(model, self.rank, self.local_rank, device, self.stage_to_rank_map, self.fp16, shared_weights)
+        self.model = PartitionedModel(model, self.rank, self.local_rank, device, self.stage_to_rank_map, self.fp16, self.stage_to_cut, shared_weights)
         self.model.initialize( get_batch_fn, from_cache=from_cache )
         self.partitioned_model = self.model
         self.shared_weight_stages = self.model.shared_weight_stages if self.shared_weights is not None else None
