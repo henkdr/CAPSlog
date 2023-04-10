@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=00:45:00
+#SBATCH --time=00:30:00
 #SBATCH -N 1
 #SBATCH -C A4000
 #SBATCH --gres=gpu:4
@@ -19,7 +19,7 @@ mkdir -p $HOME/tmp
 NODEFILE=$HOME/tmp/hosts.$SLURM_JOB_ID
 ( for i in $nodelist; do echo $i; done) > $NODEFILE
 
-DATA_PATH=/var/scratch/als271/Megatron-LM/my-gpt2_text_document
+DATA_PATH=/var/scratch/als271/Megatron-LM/more-gpt2_text_document
 CHECKPOINT_PATH=/home/als271/varuna/megatron_pretrain
 
 # 355m model
@@ -45,8 +45,9 @@ NUM_ATTENTION_HEADS=16
 
 # NCCL_DEBUG=INFO NCCL_SOCKET_IFNAME=eth0 NCCL_SOCKET_NTHREADS=4 NCCL_NSOCKS_PERTHREAD=4 \
 NCCL_SOCKET_IFNAME=eth0 NCCL_DEBUG=INFO \
-python -m varuna.run_varuna --nstages 4 --chunk_size 4 --batch_size 256 \
+python -m varuna.run_varuna --nstages 4 --chunk_size 8 --batch_size 1024 \
         --gpus_per_node 4 --no_morphing --machine_list $NODEFILE \
+        --job_id $SLURM_JOB_ID \
         --manager_ip $MASTER_ADDR \
         --code_dir '/var/scratch/als271/Megatron-LM/' pretrain_gpt2.py \
         --num-layers 24 \
@@ -60,8 +61,6 @@ python -m varuna.run_varuna --nstages 4 --chunk_size 4 --batch_size 256 \
         --distributed-backend gloo \
         --vocab-file gpt2-vocab.json \
         --merge-file gpt2-merges.txt \
-        --save $CHECKPOINT_PATH \
-        --load $CHECKPOINT_PATH \
         --save-interval 1000 \
         --data-impl mmap \
         --split 949,50,1 \
@@ -73,8 +72,7 @@ python -m varuna.run_varuna --nstages 4 --chunk_size 4 --batch_size 256 \
         --use-cpu-initialization \
         --warmup .05 \
         --log-interval 1 \
-        --exit-interval 100 \
-        --save-interval 1000 \
-        --eval-interval 1000 \
-        --eval-iters 10 \
+        --exit-interval 1000 \
+        --eval-interval 500 \
+        --eval-iters 0 \
         --varuna
