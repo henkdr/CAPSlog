@@ -88,6 +88,8 @@ def parse_args():
                         help = "disable varuna's support for job morphing on a changing resource set.")
     parser.add_argument("--env_file", type=str, default="varuna.env",
                         help = "file with environment variables for varuna command")
+    parser.add_argument("--job_id", type=str, default=None,
+                            help= "SLURM job ID.")
 
     # launch worker args
     parser.add_argument("--nstages", type=int, default=None,
@@ -117,7 +119,7 @@ def parse_args():
 if __name__ == "__main__":
 
     args = parse_args()
-
+    
     with open(args.machine_list, "r") as f:
         content = f.read()
         reachable_machines = content.split("\n")
@@ -168,8 +170,8 @@ if __name__ == "__main__":
     processes = []
     for i,machine in enumerate(reachable_machines):
         launch_cmd = launch_cmd_format.format(i, reachable_count, master_addr)
-        out_file = open(f"ssh_logs/ssh_out_node{i}", "w")
-        err_file = open(f"ssh_logs/ssh_err_node{i}", "w")
+        out_file = open(f"ssh_logs/ssh_out_{args.job_id}", "a")
+        err_file = open(f"ssh_logs/ssh_err_{args.job_id}", "a")
 
         if machine == "127.0.0.1":
             cmd = launch_cmd.split(" ")
@@ -180,11 +182,11 @@ if __name__ == "__main__":
             cmd.append(machine)
             cmd.append(f"echo \"{launch_cmd}\" > launch_varuna_{i}.sh; chmod 755 launch_varuna_{i}.sh; ")
             cmd.append(f"conda activate varuna; module load cuda11.7/toolkit; ")
+            cmd.append(f"LD_LIBRARY_PATH=/var/scratch/als271/Anaconda/pkgs/cuda-nvml-dev-11.7.91-0/lib:/var/scratch/als271/Anaconda/envs/varuna/lib:$LD_LIBRARY_PATH; ")
             cmd.append(f"{HEARTBEAT_IP_ENV_VAR}={args.manager_ip}")
             cmd.append(f"{MORPH_PORT_ENV_VAR}={MORPH_PORT} {HEARTBEAT_PORT_ENV_VAR}={HEARTBEAT_PORT}")
             cmd.append(get_env_vars(args.env_file))
             cmd.append(f"bash launch_varuna_{i}.sh")
-            #cmd.append("bash /tmp/launch_varuna.sh")
             print(" ".join(cmd ))
 
         process = subprocess.Popen(cmd, env=current_env,

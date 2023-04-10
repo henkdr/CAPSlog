@@ -129,11 +129,12 @@ def parse_stage_to_rank_map(stage_to_rank_map_str):
 
 def parse_stage_to_cut(stage_to_cut_str):
     """ parses the stage_to_cut string recieved from varuna launcher """
+    stage_to_cut_str = stage_to_cut_str.strip('[]')
     stage_cuts = stage_to_cut_str.split(",")
     stages = len(stage_cuts)
     stage_to_cut = []
     for i in range(stages):
-        stage_to_cut.append(int(stage_cuts[i]))
+        stage_to_cut.append(int(stage_cuts[i].strip()))
     # print(f"received string: {stage_to_cut_str} \n parsed mapping: {stage_to_cut}") 
     return stage_to_cut
 
@@ -174,3 +175,29 @@ def get_local_varuna_pid():
     with open(os.path.join(VARUNA_TEMP_FOLDER, LOCAL_PID_FILENAME), "w") as f:
         pid = int(f.read().strip())
     return pid
+
+
+def report_memory(name, rank):
+    """Simple GPU memory report."""
+    mega_bytes = 1024.0 * 1024.0
+
+    # allocated = torch.cuda.memory_allocated() / mega_bytes
+    # max_allocated = torch.cuda.max_memory_allocated() / mega_bytes
+    # reserved = torch.cuda.memory_reserved() / mega_bytes
+    # max_reserved = torch.cuda.max_memory_reserved() / mega_bytes
+
+    stats = torch.cuda.memory_stats()
+    allocated_peak = stats["allocated_bytes.all.peak"]
+    reserved_peak = stats["reserved_bytes.all.peak"]
+
+    string = 'Memory allocated on rank {} '.format(rank)
+    string += name
+    # string += ' | allocated: {}'.format(allocated)
+    string += ' | peak allocated: {}'.format(allocated_peak)
+    # string += ' | reserved: {}'.format(reserved)
+    string += ' | peak reserved: {}'.format(reserved_peak)
+    
+    print(string)
+    torch.cuda.reset_peak_memory_stats()
+
+    return (allocated_peak, reserved_peak)

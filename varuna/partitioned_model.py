@@ -116,7 +116,6 @@ def dry_run(model, get_batch, from_cache):
         hooks.append( module.register_forward_hook(get_hook(name)))
         if isinstance(module, CutPoint):
             num_cutpoints += 1
-
     print("Num cutpoints is", num_cutpoints)
     
     # TODO: do this extra compute on GPU? large models...
@@ -225,8 +224,10 @@ class PartitionedModel(Module):
         if self.stage_to_cut is None:
             cuts_per_stage = int((self.num_cutpoints + 1)/self.num_stages)
             self.stage_to_cut = [i for i in range(0, self.num_cutpoints, cuts_per_stage)]
-
-        print(f"Stage to cut is: {self.stage_to_cut}")
+        assert len(self.stage_to_cut) == self.num_stages, "Stage-to-cut mapping must be number-of-stages long!"
+        assert self.stage_to_cut[-1] <= self.num_cutpoints, "The last cut index in the stage-to-cut mapping must be smaller than total number of cutpoints"
+        if (self.rank == 0):
+            print(f"Stage to cut is: {self.stage_to_cut}")
 
         if self.shared_weights is not None:
             self.find_shared_weight_stages()

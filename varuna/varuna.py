@@ -225,8 +225,8 @@ class Varuna(Module):
             ranks = [self.stage_to_rank_map[i][replica] for i in range(self.partitions)]
             if len(ranks) > 1:
                 pipeline_groups[replica] = dist.new_group(ranks=ranks)
-                if self.shared_weight_stages is not None:
-                    recv_stage, send_stage = self.shared_weight_stages[0]
+                if self.shared_weight_stages:
+                    recv_stage, send_stage = self.shared_weight_stages[0] # BAZI: should this be hard-coded to only index 0?
                     tied_ranks = [ranks[recv_stage], ranks[send_stage]]
                     tied_groups[replica] = dist.new_group(ranks=tied_ranks)
                 else:
@@ -304,19 +304,20 @@ class Varuna(Module):
         if log_verbose:
             print(f'{self.rank} {self.rank_within_stage} all-reduce done;')
 
-        batch_time = time.time() - batch_time
+        batch_time = time.time() - batch_time        
         self.iteration += 1
         self.current_step += 1
+        utils.report_memory('after {} iterations'.format(self.iteration), self.rank)
         
-        if self.current_step <= 5:
-            message = "slowcheck {} {} {} {}".\
-                        format(self.current_step, self.stage, self.rank_within_stage,fwd_time)
-            utils.heartbeat(message, self.manager_ip, self.manager_port)
+        # if self.current_step <= 5:
+        #     message = "slowcheck {} {} {} {}".\
+        #                 format(self.current_step, self.stage, self.rank_within_stage,fwd_time)
+        #     utils.heartbeat(message, self.manager_ip, self.manager_port)
             
                     
-        if self.rank == 0 and self.iteration%5==0:
-            message = "progress {} {}".format(batch_time, self.iteration)
-            utils.heartbeat(message, self.manager_ip, self.manager_port)
+        # if self.rank == 0 and self.iteration%5==0:
+        #     message = "progress {} {}".format(batch_time, self.iteration)
+        #     utils.heartbeat(message, self.manager_ip, self.manager_port)
 
         return self.average_loss, overflow, grad_norm
 
