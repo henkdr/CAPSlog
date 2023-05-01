@@ -189,7 +189,6 @@ class PartitionedModel(Module):
         self.fp16 = fp16
         self.shared_weights = shared_weights
 
-        # BAZI: added this parameter
         self.stage_to_cut = stage_to_cut
         
         self.grads_send_queue = self.acts_send_queue = None
@@ -223,7 +222,10 @@ class PartitionedModel(Module):
 
         if self.stage_to_cut is None:
             cuts_per_stage = int((self.num_cutpoints + 1)/self.num_stages)
-            self.stage_to_cut = [i for i in range(0, self.num_cutpoints, cuts_per_stage)]
+            if cuts_per_stage == 1:
+                self.stage_to_cut = [i for i in range (0, self.num_stages)]
+            else:
+                self.stage_to_cut = [i for i in range(0, self.num_cutpoints, cuts_per_stage)]
         assert len(self.stage_to_cut) == self.num_stages, "Stage-to-cut mapping must be number-of-stages long!"
         assert self.stage_to_cut[-1] <= self.num_cutpoints, "The last cut index in the stage-to-cut mapping must be smaller than total number of cutpoints"
         if (self.rank == 0):
@@ -354,7 +356,6 @@ class PartitionedModel(Module):
                     weight_stages[w] = curr_stage
 
         # cuts_per_stage = (self.num_cutpoints + 1)/ self.num_stages
-        # BAZI
         stage_to_cut_ranges = []
         for stage, cut in enumerate(self.stage_to_cut):
             if stage == self.num_stages - 1:
@@ -404,7 +405,6 @@ class PartitionedModel(Module):
                 continue
             if isinstance(module, CutPoint):
                 # if (index % self.cuts_per_stage == 0):
-                # BAZI
                 if (index in self.stage_to_cut):
                     # pre cp
                     if assigned_index == self.stage:
@@ -507,7 +507,6 @@ class PartitionedModel(Module):
 
         # start_pstage = self.cuts_per_stage * self.stage
         # end_pstage = self.cuts_per_stage * (self.stage+1)
-        # BAZI
         start_pstage = self.stage_to_cut[self.stage]
         end_pstage = self.stage_to_cut[self.stage+1] if self.stage < (self.num_stages - 1) else (self.num_cutpoints + 1)
 

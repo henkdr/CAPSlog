@@ -28,8 +28,19 @@ def scatter(input, batch_size, chunk_size):
         # TODO: what will happen for indivisibilities in uneven data parallelism !!
         # print(dist.get_rank(),k,v.size())
         # special case for GPT-2 attention mask
+
         if v is None:
             chunked_values = [None for _ in range(num_microbatches)]
+        # for DETR: nested tensor type
+        elif hasattr(v, "tensors") and hasattr(v, "mask"):
+            chunked_values = v.varunafy(num_microbatches, chunk_size)
+        # for DETR: target list
+        elif isinstance(v, list):
+            if len(v) == 1:
+                chunked_values = [v for _ in range(num_microbatches)]
+            else:
+                chunked_values = [v[i:i + chunk_size] for i in range(0, len(v), chunk_size)]
+
         elif v.size(0) == 1:
             chunked_values = [v for _ in range(num_microbatches)]
         else:

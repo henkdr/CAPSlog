@@ -228,8 +228,8 @@ if __name__ == "__main__":
 
     for rank in ranks_in_server:
 
-        # out_file = open(f"/home/als271/varuna/ssh_logs/ssh_out_gpu{rank}", "w")
-        # err_file = open(f"/home/als271/varuna/ssh_logs/ssh_err_gpu{rank}", "w")
+        out_file = open(f"/home/als271/varuna/ssh_logs/ssh_out_gpu{rank}", "w")
+        err_file = open(f"/home/als271/varuna/ssh_logs/ssh_err_gpu{rank}", "w")
         
         local_rank = rank % args.ngpus_per_server
         rank = alias_ranks[rank]            
@@ -256,7 +256,7 @@ if __name__ == "__main__":
         cmd.extend(args.training_script_args)
         print(" ".join(cmd), flush=True)
 
-        process = subprocess.Popen(cmd, env=current_env,cwd=args.code_dir) #, stdout=out_file, stderr=err_file)
+        process = subprocess.Popen(cmd, env=current_env,cwd=args.code_dir, stdout=out_file, stderr=err_file)
         processes.append(process)
 
     # wait for all processes

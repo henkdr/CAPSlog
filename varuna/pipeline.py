@@ -176,7 +176,7 @@ class Pipeline:
         send_handles = Queue()
         while count > 0:
             output_acts = self.acts_send_queue.get()
-            handle = dist.isend(output_acts, dst=self.send_rank)
+            handle = dist.isend(output_acts.contiguous(), dst=self.send_rank) # BAZI ADDED CONTIGUOUs HERE !
             send_handles.put(handle)
             if send_handles.qsize()>4:
                 handle = send_handles.get()

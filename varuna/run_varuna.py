@@ -194,7 +194,12 @@ if __name__ == "__main__":
                                     stderr=err_file)
         print("process", process)
         processes.append(process)
-    for process in processes:
-        print("wait for process", process)
-        status = process.wait()
-        print("status", status)
+    try:
+        for process in processes:
+            process.wait()
+            print("Process done with return code", process.returncode)
+            if process.returncode != 0:
+                for p in processes:
+                    p.kill()
+    except Exception as e:
+        print("run_varuna quit with error:", e)
