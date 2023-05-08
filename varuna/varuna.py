@@ -191,15 +191,19 @@ class Varuna(Module):
         self.fwd_inp_shape = self.bwd_grad_shape = None
         self.fwd_inp_shape_changes = self.bwd_grad_shape_changes = None
         if self.stage > 0:
-            self.fwd_inp_shape = self.model.forward_input_shapes[0]
-            self.fwd_inp_shape_changes = self.model.fwd_inp_shape_changes[0]
-            for i in self.fwd_inp_shape_changes:
-                self.fwd_inp_shape[i] =  self.micro_batch_size
+            self.fwd_inp_shape = self.model.forward_input_shapes # A list of lists of shapes
+            self.fwd_inp_shape_changes = self.model.fwd_inp_shape_changes # A list of lists of indices
+            for idx, lst in enumerate(self.fwd_inp_shape_changes):
+                for i in lst:
+                    self.fwd_inp_shape[idx][i] =  self.micro_batch_size
+            print("Varuna.py line 199: fwd_inp_shape: ", self.fwd_inp_shape)
         if self.stage < (self.partitions-1):
-            self.bwd_grad_shape = self.model.backward_grad_shapes[0]
-            self.bwd_grad_shape_changes = self.model.bwd_grad_shape_changes[0]
-            for i in self.bwd_grad_shape_changes:
-                self.bwd_grad_shape[i] = self.micro_batch_size
+            self.bwd_grad_shape = self.model.backward_grad_shapes
+            self.bwd_grad_shape_changes = self.model.bwd_grad_shape_changes
+            for idx, lst in enumerate(self.bwd_grad_shape_changes):
+                for i in lst:
+                    self.bwd_grad_shape[idx][i] = self.micro_batch_size
+            print("Varuna.py line 205: bwd_grad_shape: ", self.bwd_grad_shape)
 
     def init_distributed(self):
         # create same process groups on all ranks

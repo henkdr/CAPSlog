@@ -66,17 +66,18 @@ class CutPoint(Module):
         class CutpointFunction(torch.autograd.Function):
 
             @staticmethod
-            def forward(ctx, i):
+            def forward(ctx, *i):
                 # recieve activations
                 if is_in_next_stage and self.recv_fn is not None:
                     i = self.recv_fn()
                 # send activations
                 elif is_in_prev_stage and self.send_fn is not None:
                     self.send_fn(i)
+
                 return i
 
             @staticmethod
-            def backward(ctx, grad_output):
+            def backward(ctx, *grad_output):
                 # receive gradients.
                 if is_in_prev_stage and self.recv_fn is not None:
                     grad_output = self.recv_fn(grads = True)
@@ -84,7 +85,7 @@ class CutPoint(Module):
                 elif is_in_next_stage and self.send_fn is not None:
                     self.send_fn(grad_output, grads = True)
                 return grad_output
-        
+
         c = CutpointFunction()
         self.cp_func = c
 
@@ -103,8 +104,10 @@ def dry_run(model, get_batch, from_cache):
             if name not in ordered_modules:
                 ordered_modules[name] = module
             if isinstance(module, CutPoint):
-                # TODO: if len(inputs) > 1: error
-                input_shapes[name] = [list(inputs[0].size())]
+                # inputs is a tuple of of tensors
+                # input_shapes[name] is a list of each tensor size in that tuple.
+                # where the size is itself represented as a list
+                input_shapes[name] = [list(i.size()) for i in inputs]
         return add_module_hook
 
     modules = model.named_modules()
@@ -129,17 +132,21 @@ def dry_run(model, get_batch, from_cache):
 
     shape_indices_to_change = dict()
     for name in input_shapes:
-        shape_1 = input_shapes_1[name][0]
-        shape_2 = input_shapes_2[name][0]
-        assert len(shape_1) == len(shape_2)
-        indices_to_change = []
-        for i, d1 in enumerate(shape_1):
-            d2 = shape_2[i]
-            if d1 == 1 and d2 == 2:
-                indices_to_change.append(i)
-            else:
-                assert d1 == d2
-        shape_indices_to_change[name] = [indices_to_change]
+        shape_indices_to_change[name] = []
+
+        # iterate through list of tensor-shapes for named cutpoint
+        for idx, shape in enumerate(input_shapes_1[name]):
+            shape_1 = shape
+            shape_2 = input_shapes_2[name][idx]
+            assert len(shape_1) == len(shape_2) # same nr of dimensions
+            indices_to_change = []
+            for i, d1 in enumerate(shape_1): # iterate through each dimension
+                d2 = shape_2[i]
+                if d1 == 1 and d2 == 2:
+                    indices_to_change.append(i) # batch-size index
+                else:
+                    assert d1 == d2 # all other dimension sizes should be the same
+            shape_indices_to_change[name].append(indices_to_change) # append list of indices of batch-size-sensitive dimensions for tensor at idx
 
     for h in hooks:
         h.remove()
@@ -151,6 +158,10 @@ def dry_run(model, get_batch, from_cache):
         pickle.dump(input_shapes,f)
     with open("_tmp_shape_changes",'wb') as f:
         pickle.dump(shape_indices_to_change,f)
+
+    print("DRY RUN RESULTS: ")
+    print("input shapes: ", input_shapes)
+    print("shape_indices_to_change: ", shape_indices_to_change)
 
     return ordered_modules, input_shapes, \
             shape_indices_to_change, num_cutpoints
@@ -378,7 +389,7 @@ class PartitionedModel(Module):
         self.shared_weight_stages = shared_weight_stages
 
 
-# """ setting actual cutpoint functions for comunication. """
+    # """ setting actual cutpoint functions for comunication. """
     def prep_cutpoints(self):
 
         def attach_meta(cutpoint, index):
@@ -408,8 +419,8 @@ class PartitionedModel(Module):
                 if (index in self.stage_to_cut):
                     # pre cp
                     if assigned_index == self.stage:
-                        self.forward_input_shapes = self.input_shapes[name]
-                        self.fwd_inp_shape_changes = self.shape_indices_to_change[name]
+                        self.forward_input_shapes = self.input_shapes[name] # a list of lists of shapes
+                        self.fwd_inp_shape_changes = self.shape_indices_to_change[name] # a list of lists of indices
                         self.pre_cp = module
                     # post cp
                     if assigned_index == self.stage + 1:
@@ -423,7 +434,7 @@ class PartitionedModel(Module):
             if assigned_index == self.num_stages:
                 break
         
-# """ remove unused modules to save memory. """
+    # """ remove unused modules to save memory. """
     def remove_unused_parameters(self):
 
         pre_cp_index = self.stage
@@ -536,12 +547,18 @@ class PartitionedModel(Module):
         self.recompute_queue = recompute
 
     def set_send_fn(self, recompute = False):
-        def send(tensor, grads = False):
+        def send(tensor_tuple, grads = False):
             if grads:
-                self.grads_send_queue.put(tensor.cpu())
+                self.grads_send_queue.put(tensor_tuple[0].cpu()) # BAZI put [0] for now
             else:
                 if not recompute:
-                    self.acts_send_queue.put(tensor.cpu())
+                    for t in tensor_tuple:
+                        self.acts_send_queue.put(t.cpu()) # BAZI put [0] for now
+                    # BAZI DIFF: 
+                    # sendlist = []
+                    # for tensor in tensors:
+                    #     sendlist.append(tensor.cpu())
+                    # self.acts_send_queue.put(sendlist)
 
         if self.pre_cp is not None:
             self.pre_cp.send_fn = send
@@ -550,18 +567,20 @@ class PartitionedModel(Module):
 
     def set_recv_fn(self, recompute=False):
         acts = None
-        if recompute:
+        if recompute: # BAZI TODO: figure out
             rng_states, acts = self.recompute_queue.get()
             restore_rng_states(rng_states, self.device)
         else:
             acts = self.acts_queue.get() if self.stage > 0 else None
         if self.stage > 0:
-            acts = acts.to(self.device) 
+            acts = acts.to(self.device) # received acts of type tensor ! BAZI
+            # BAZI DIFF :
+            # acts = [a.to(self.device) for a in acts]
 
-        def recv(grads = False):
+        def recv(grads = False):  # BAZI: backward is just single tensor ??
             if grads:
                 g = self.grads_queue.get().to(self.device)
-                return g
+                return (g,)
             else:
                 return acts
         if self.pre_cp is not None:
@@ -570,7 +589,7 @@ class PartitionedModel(Module):
             self.post_cp.recv_fn = recv
         return acts
 
-    def set_recv_acts(self, shape, receive_rank):
+    def set_recv_acts(self, shape, receive_rank): # BAZI TODO: part of evaluation
         def recv(grads=False):
             x = torch.zeros(shape, dtype=torch.float16 if self.fp16 else torch.float32)
             dist.recv(x, receive_rank)
@@ -653,7 +672,7 @@ class PartitionedModel(Module):
         
         if save_ctx:
             if self.stage > 0:
-                recv_acts = recv_acts.cpu()
+                recv_acts = recv_acts.cpu() # BAZI TODO: should this be applied via list comprehension ?
             ctx = (rng_states, recv_acts)
             self.recompute_queue.put(ctx)
 

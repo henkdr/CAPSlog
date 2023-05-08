@@ -125,10 +125,10 @@ class Pipeline:
 
         for task,index in self.schedule:
             if task == 0:
-                fwd_inp_shape = self.fwd_inp_shape
+                fwd_inp_shape = self.fwd_inp_shape[0] # BAZI hardcoded for now all shape[0]s !!
                 if index == (chunks-1) and self.last_chunk_size > 0:
-                    fwd_inp_shape = list(self.fwd_inp_shape)
-                    for d in self.fwd_inp_shape_changes:
+                    fwd_inp_shape = list(self.fwd_inp_shape[0])
+                    for d in self.fwd_inp_shape_changes[0]:
                         fwd_inp_shape[d] = self.last_chunk_size
                 acts_tensor = torch.ones(fwd_inp_shape, dtype=dtype)
                 handle = dist.irecv(acts_tensor, src=self.receive_rank)
@@ -150,10 +150,10 @@ class Pipeline:
 
         for task,index in self.schedule:
             if task == 2:
-                bwd_grad_shape = self.bwd_grad_shape
+                bwd_grad_shape = self.bwd_grad_shape[0]
                 if index == (chunks-1) and self.last_chunk_size > 0:
-                    bwd_grad_shape = list(self.bwd_grad_shape)
-                    for d in self.bwd_grad_shape_changes:
+                    bwd_grad_shape = list(self.bwd_grad_shape[0])
+                    for d in self.bwd_grad_shape_changes[0]:
                         bwd_grad_shape[d] = self.last_chunk_size
                 grads_tensor = torch.ones(bwd_grad_shape, dtype=dtype)
                 handle = dist.irecv(grads_tensor, src=self.send_rank)
