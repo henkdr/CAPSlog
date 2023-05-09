@@ -125,23 +125,26 @@ class Pipeline:
 
         for task,index in self.schedule:
             if task == 0:
-                fwd_inp_shape = self.fwd_inp_shape[0] # BAZI hardcoded for now all shape[0]s !!
-                if index == (chunks-1) and self.last_chunk_size > 0:
-                    fwd_inp_shape = list(self.fwd_inp_shape[0])
-                    for d in self.fwd_inp_shape_changes[0]:
-                        fwd_inp_shape[d] = self.last_chunk_size
-                acts_tensor = torch.ones(fwd_inp_shape, dtype=dtype)
-                handle = dist.irecv(acts_tensor, src=self.receive_rank)
-                recv_handles.put((handle, acts_tensor))
-                if recv_handles.qsize()>4:
-                    handle, tensor = recv_handles.get()
+                tensors = [None] * len(self.fwd_inp_shape)
+
+                for i, fwd_inp_shape in enumerate(self.fwd_inp_shape):
+                    if index == (chunks-1) and self.last_chunk_size > 0:
+                        for d in self.fwd_inp_shape_changes[i]:
+                            fwd_inp_shape[d] = self.last_chunk_size
+
+                    tensors[i] = torch.ones(fwd_inp_shape, dtype=dtype)
+                    handle = dist.irecv(tensors[i], src=self.receive_rank, tag=i)
+                    recv_handles.put(handle)
+                
+                # if recv_handles.qsize()>4:
+                #     handle, tensor = recv_handles.get()
+                #     handle.wait()
+                #     self.acts_queue.put(tensor)
+                while not recv_handles.empty():
+                    handle = recv_handles.get()
                     handle.wait()
-                    self.acts_queue.put(tensor)
-        while not recv_handles.empty():
-            handle, tensor = recv_handles.get()
-            handle.wait()
-            self.acts_queue.put(tensor)
-        del acts_tensor
+                self.acts_queue.put(tensors)
+        del tensors
     
     def grads_receiver(self):
         chunks = len(self.batches)
@@ -150,23 +153,27 @@ class Pipeline:
 
         for task,index in self.schedule:
             if task == 2:
-                bwd_grad_shape = self.bwd_grad_shape[0]
-                if index == (chunks-1) and self.last_chunk_size > 0:
-                    bwd_grad_shape = list(self.bwd_grad_shape[0])
-                    for d in self.bwd_grad_shape_changes[0]:
-                        bwd_grad_shape[d] = self.last_chunk_size
-                grads_tensor = torch.ones(bwd_grad_shape, dtype=dtype)
-                handle = dist.irecv(grads_tensor, src=self.send_rank)
-                recv_handles.put((handle, grads_tensor))
-                if recv_handles.qsize()>4:
-                    handle, tensor = recv_handles.get()
+                tensors = [None] * len(self.bwd_grad_shape)
+
+                for i, bwd_grad_shape in enumerate(self.bwd_grad_shape):
+                    if index == (chunks-1) and self.last_chunk_size > 0:
+                        for d in self.bwd_grad_shape_changes[i]: # BAZI DOUBLE CHECK: should grad shapes be converted to a list ??
+                            bwd_grad_shape[d] = self.last_chunk_size
+
+                    tensors[i] = torch.ones(bwd_grad_shape, dtype=dtype)
+                    tag_id = i + 10
+                    handle = dist.irecv(tensors[i], src=self.send_rank, tag=tag_id)
+                    recv_handles.put(handle)
+                    
+                    # if recv_handles.qsize()>4:
+                    #     handle, tensor = recv_handles.get()
+                    #     handle.wait()
+                    #     self.grads_queue.put(tensor)
+                while not recv_handles.empty():
+                    handle = recv_handles.get()
                     handle.wait()
-                    self.grads_queue.put(tensor)
-        while not recv_handles.empty():
-            handle, tensor = recv_handles.get()
-            handle.wait()
-            self.grads_queue.put(tensor)
-        del grads_tensor
+                self.grads_queue.put(tensors)
+        del tensors
 
     def acts_sender(self):
         count = 0
@@ -175,10 +182,11 @@ class Pipeline:
                 count += 1
         send_handles = Queue()
         while count > 0:
-            output_acts = self.acts_send_queue.get()
-            handle = dist.isend(output_acts.contiguous(), dst=self.send_rank) # BAZI ADDED CONTIGUOUs HERE !
-            send_handles.put(handle)
-            if send_handles.qsize()>4:
+            output_acts = self.acts_send_queue.get() # list of acts
+            for tag_id, act in enumerate(output_acts):
+                handle = dist.isend(act.contiguous(), dst=self.send_rank, tag=tag_id) # BAZI ADDED CONTIGUOUs HERE !
+                send_handles.put(handle)
+            if send_handles.qsize() > len(output_acts):
                 handle = send_handles.get()
                 handle.wait()
             count -= 1
@@ -193,13 +201,13 @@ class Pipeline:
                 count += 1
         
         send_handles = Queue()
-
         while count > 0:
             input_grads = self.grads_send_queue.get()
-            # TODO: why is this contiguous needed ???
-            handle = dist.isend(input_grads.contiguous(), dst=self.receive_rank)
-            send_handles.put(handle)
-            if send_handles.qsize()>4:
+            for tag_id, grad in enumerate(input_grads):
+                tag_id = tag_id + 10 # BAZI FIGURE OUT SEPARATE TAGS
+                handle = dist.isend(grad.contiguous(), dst=self.receive_rank, tag=tag_id)
+                send_handles.put(handle)
+            if send_handles.qsize()>len(input_grads):
                 handle = send_handles.get()
                 handle.wait()
             count -= 1
@@ -245,6 +253,7 @@ class Pipeline:
         
         # backward
         else:
+            print("in backward block of pipeline !")
             grads = torch.ones(self.loss.size(), dtype = torch.float32).to(self.device)
 
             if self.stage == self.partitions - 1:
@@ -257,6 +266,9 @@ class Pipeline:
                             last_partition=(self.stage == self.partitions-1)) as scaled_loss:
                     scaled_loss.backward(grads)
             else:
+                print("calling self.loss.backward")
+                if grads is not None:
+                    print("size of grads is: ", grads.size())
                 self.loss.backward(grads)
 
             del self.loss

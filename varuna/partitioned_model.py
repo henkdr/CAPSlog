@@ -548,17 +548,14 @@ class PartitionedModel(Module):
 
     def set_send_fn(self, recompute = False):
         def send(tensor_tuple, grads = False):
+            sendlist = []
+            for tensor in tensor_tuple:
+                sendlist.append(tensor.cpu())
             if grads:
-                self.grads_send_queue.put(tensor_tuple[0].cpu()) # BAZI put [0] for now
+                self.grads_send_queue.put(sendlist)
             else:
                 if not recompute:
-                    for t in tensor_tuple:
-                        self.acts_send_queue.put(t.cpu()) # BAZI put [0] for now
-                    # BAZI DIFF: 
-                    # sendlist = []
-                    # for tensor in tensors:
-                    #     sendlist.append(tensor.cpu())
-                    # self.acts_send_queue.put(sendlist)
+                    self.acts_send_queue.put(sendlist)
 
         if self.pre_cp is not None:
             self.pre_cp.send_fn = send
@@ -572,15 +569,14 @@ class PartitionedModel(Module):
             restore_rng_states(rng_states, self.device)
         else:
             acts = self.acts_queue.get() if self.stage > 0 else None
+            # acts is a list of tensors or None
         if self.stage > 0:
-            acts = acts.to(self.device) # received acts of type tensor ! BAZI
-            # BAZI DIFF :
-            # acts = [a.to(self.device) for a in acts]
+            acts = tuple(a.to(self.device) for a in acts)
 
-        def recv(grads = False):  # BAZI: backward is just single tensor ??
+        def recv(grads = False):
             if grads:
-                g = self.grads_queue.get().to(self.device)
-                return (g,)
+                grds = self.grads_queue.get()
+                return tuple(g.to(self.device) for g in grds)
             else:
                 return acts
         if self.pre_cp is not None:
