@@ -40,15 +40,18 @@ class CutPoint(Module):
             self.boundary_func()
         
         if self.cp_func is None:
-            return inputs[0]
+            return inputs
 
-        if len(inputs) < 0 or (len(inputs) == 1 and inputs[0] is None):
+        if len(inputs) < 0 or inputs[0] is None:
             if self.pruning:
                 inputs = (torch.tensor([-1.0], requires_grad = True))
+                inputs = (inputs,)
             else:
                 dtype = torch.float16 if self.fp16 else torch.float32
-                inputs = torch.tensor([-1.0], requires_grad = True, dtype=dtype).to(self.device)
-            inputs = (inputs,)
+                tensor_inputs = []
+                for i in inputs:
+                    tensor_inputs.append(torch.tensor([-1.0], requires_grad = True, dtype=dtype).to(self.device))
+                inputs = tuple(tensor_inputs)
 
         if isinstance(self.cp_func, torch.autograd.Function):
             out = self.cp_func.apply(*inputs, **kwargs)            
@@ -73,7 +76,6 @@ class CutPoint(Module):
                 # send activations
                 elif is_in_prev_stage and self.send_fn is not None:
                     self.send_fn(i)
-
                 return i
 
             @staticmethod
