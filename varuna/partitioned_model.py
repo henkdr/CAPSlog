@@ -44,13 +44,14 @@ class CutPoint(Module):
 
         if len(inputs) < 0 or inputs[0] is None:
             if self.pruning:
+                print("IN PARTIOTNED MODEL PRUNING BLOCK..???")
                 inputs = (torch.tensor([-1.0], requires_grad = True))
                 inputs = (inputs,)
             else:
                 dtype = torch.float16 if self.fp16 else torch.float32
                 tensor_inputs = []
-                for i in inputs:
-                    tensor_inputs.append(torch.tensor([-1.0], requires_grad = True, dtype=dtype).to(self.device))
+                for i in range(len(inputs)):
+                    tensor_inputs.append(torch.tensor([-1.0], requires_grad = self.bwd_req_grads[i], dtype=dtype).to(self.device))
                 inputs = tuple(tensor_inputs)
 
         if isinstance(self.cp_func, torch.autograd.Function):
@@ -70,6 +71,9 @@ class CutPoint(Module):
 
             @staticmethod
             def forward(ctx, *i):
+                # for idx, tens in enumerate(i):
+                #     print(f"input nr {idx} requires_grad = {tens.requires_grad}")
+
                 # recieve activations
                 if is_in_next_stage and self.recv_fn is not None:
                     i = self.recv_fn()
@@ -99,6 +103,7 @@ def dry_run(model, get_batch, from_cache):
     dummy_inputs = get_batch(1, device='cpu')
     ordered_modules = OrderedDict()
     input_shapes = {}
+    input_gradients = {} 
     num_cutpoints = 0
 
     def get_hook(name):
@@ -110,6 +115,7 @@ def dry_run(model, get_batch, from_cache):
                 # input_shapes[name] is a list of each tensor size in that tuple.
                 # where the size is itself represented as a list
                 input_shapes[name] = [list(i.size()) for i in inputs]
+                input_gradients[name] = [i.requires_grad for i in inputs]
         return add_module_hook
 
     modules = model.named_modules()
@@ -160,13 +166,16 @@ def dry_run(model, get_batch, from_cache):
         pickle.dump(input_shapes,f)
     with open("_tmp_shape_changes",'wb') as f:
         pickle.dump(shape_indices_to_change,f)
+    with open("_tmp_inp_grads",'wb') as f:
+        pickle.dump(input_gradients,f)
 
     print("DRY RUN RESULTS: ")
-    print("input shapes: ", input_shapes)
+    print("input_shapes: ", input_shapes)
     print("shape_indices_to_change: ", shape_indices_to_change)
+    print("input_gradients: ", input_gradients)
 
     return ordered_modules, input_shapes, \
-            shape_indices_to_change, num_cutpoints
+            shape_indices_to_change, input_gradients, num_cutpoints
 
 def read_dry_run_out(model):
     with open("_tmp_ord_mod",'rb') as f:
@@ -184,10 +193,14 @@ def read_dry_run_out(model):
         input_shapes = pickle.load(f)
     with open("_tmp_shape_changes",'rb') as f:
         shape_indices_to_change = pickle.load(f)
+    with open("_tmp_inp_grads",'rb') as f:
+        input_gradients = pickle.load(f)
+
+
     num_cutpoints = len(input_shapes)
     
     return ordered_modules, input_shapes, \
-            shape_indices_to_change, num_cutpoints
+            shape_indices_to_change, input_gradients, num_cutpoints
 
 
 class PartitionedModel(Module):
@@ -258,12 +271,12 @@ class PartitionedModel(Module):
             all([os.path.exists(f) for f in ["_tmp_ord_mod","_tmp_inp_shapes","_tmp_shape_changes"]])):
 
             self.ordered_modules, self.input_shapes, self.shape_indices_to_change, \
-                self.num_cutpoints = dry_run(self.module, get_batch, from_cache)
+                self.input_gradients, self.num_cutpoints = dry_run(self.module, get_batch, from_cache)
             dist.barrier()
         else:
             dist.barrier()
             self.ordered_modules, self.input_shapes, self.shape_indices_to_change, \
-                self.num_cutpoints = read_dry_run_out(self.module)
+                self.input_gradients, self.num_cutpoints = read_dry_run_out(self.module)
             
         if self.local_rank == 0 and not (from_cache and os.path.exists("_tmp_pstage_mapping")):
             dummy_inputs = get_batch(1, "cpu")
@@ -394,13 +407,14 @@ class PartitionedModel(Module):
     # """ setting actual cutpoint functions for comunication. """
     def prep_cutpoints(self):
 
-        def attach_meta(cutpoint, index):
+        def attach_meta(cutpoint, index, bwd_req_grads):
             cutpoint.cp_index = index
             cutpoint.num_stages = self.num_stages
             cutpoint.set_ret_val_func = self.set_ret_val
             cutpoint.stage = self.stage
             cutpoint.device = self.device
             cutpoint.fp16 = self.fp16
+            cutpoint.bwd_req_grads = bwd_req_grads
             cutpoint.set_cp_func()
 
         # self.cuts_per_stage = (self.num_cutpoints + 1) // self.num_stages
@@ -429,7 +443,7 @@ class PartitionedModel(Module):
                         self.backward_grad_shapes = self.input_shapes[name]
                         self.bwd_grad_shape_changes = self.shape_indices_to_change[name]
                         self.post_cp = module
-                    attach_meta(module, assigned_index)
+                    attach_meta(module, assigned_index, self.input_gradients[name])
                     assigned_index += 1  
                 index += 1
             # found all relevant cutpoints, break
@@ -511,7 +525,7 @@ class PartitionedModel(Module):
         # if cp_count < self.cuts_per_stage:
         for p in temp_param_names:
             param_name_to_pstage[p] = stage_index
-        # TODO: this is still hard-coded!!!
+        # TODO: this is still hard-coded!!! BAZI CHECK
         param_name_to_pstage["lm_head_weight"] = stage_index
             
         return param_name_to_pstage
@@ -637,8 +651,7 @@ class PartitionedModel(Module):
         return times
 
     def forward(self, inputs_as_dict, recompute=False, save_ctx=False, 
-                recording=False, handle_comm=False):
-        
+                recording=False, handle_comm=False):        
         if save_ctx:
             # if these acts are going to be recomputed
             rng_states = save_rng_states(self.device)
@@ -670,7 +683,7 @@ class PartitionedModel(Module):
         
         if save_ctx:
             if self.stage > 0:
-                recv_acts = recv_acts.cpu() # BAZI TODO: should this be applied via list comprehension ?
+                recv_acts = tuple(r.cpu() for r in recv_acts)
             ctx = (rng_states, recv_acts)
             self.recompute_queue.put(ctx)
 
