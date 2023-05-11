@@ -3,6 +3,8 @@ import torch
 from torch import Tensor, nn
 import torch.distributed as dist
 
+from torchviz import make_dot, make_dot_from_trace
+
 from queue import Queue
 from threading import Thread
 try:
@@ -132,8 +134,10 @@ class Pipeline:
                         for d in self.fwd_inp_shape_changes[i]:
                             fwd_inp_shape[d] = self.last_chunk_size
 
+                    tag_id = i + (index *  len(self.fwd_inp_shape))
+
                     tensors[i] = torch.ones(fwd_inp_shape, dtype=dtype)
-                    handle = dist.irecv(tensors[i], src=self.receive_rank, tag=i)
+                    handle = dist.irecv(tensors[i], src=self.receive_rank, tag=tag_id)
                     recv_handles.put(handle)
                 
                 # if recv_handles.qsize()>4:
@@ -157,11 +161,13 @@ class Pipeline:
 
                 for i, bwd_grad_shape in enumerate(self.bwd_grad_shape):
                     if index == (chunks-1) and self.last_chunk_size > 0:
-                        for d in self.bwd_grad_shape_changes[i]: # BAZI DOUBLE CHECK: should grad shapes be converted to a list ??
+                        for d in self.bwd_grad_shape_changes[i]:
                             bwd_grad_shape[d] = self.last_chunk_size
 
                     tensors[i] = torch.ones(bwd_grad_shape, dtype=dtype)
-                    tag_id = i + 10
+                    # tag unique to this tensor in this micro-batch
+                    # gradient tags are negative
+                    tag_id = -(i + (index *  len(self.bwd_grad_shape)))
                     handle = dist.irecv(tensors[i], src=self.send_rank, tag=tag_id)
                     recv_handles.put(handle)
                     
@@ -180,11 +186,14 @@ class Pipeline:
         for task,index in self.schedule:
             if task == 0:
                 count += 1
+        
         send_handles = Queue()
+        indexing_count = count
         while count > 0:
             output_acts = self.acts_send_queue.get() # list of acts
-            for tag_id, act in enumerate(output_acts):
-                handle = dist.isend(act.contiguous(), dst=self.send_rank, tag=tag_id) # BAZI ADDED CONTIGUOUs HERE !
+            for i, act in enumerate(output_acts):
+                tag_id = i + ((indexing_count - count) *  len(self.bwd_grad_shape))
+                handle = dist.isend(act.contiguous(), dst=self.send_rank, tag=tag_id)
                 send_handles.put(handle)
             if send_handles.qsize() > len(output_acts):
                 handle = send_handles.get()
@@ -201,10 +210,11 @@ class Pipeline:
                 count += 1
         
         send_handles = Queue()
+        indexing_count = count
         while count > 0:
             input_grads = self.grads_send_queue.get()
-            for tag_id, grad in enumerate(input_grads):
-                tag_id = tag_id + 10 # BAZI FIGURE OUT SEPARATE TAGS
+            for i, grad in enumerate(input_grads):
+                tag_id = -(i + ((indexing_count - count) *  len(self.fwd_inp_shape)))
                 handle = dist.isend(grad.contiguous(), dst=self.receive_rank, tag=tag_id)
                 send_handles.put(handle)
             if send_handles.qsize()>len(input_grads):
@@ -236,6 +246,12 @@ class Pipeline:
                 post_fwd = torch.cuda.Event(enable_timing=True)
                 pre_fwd.record()
             output = self.model(inputs_as_dict, save_ctx=not grad_mode, handle_comm=True)
+
+            # compgraph = make_dot(output, params=dict(self.model.named_parameters()), show_attrs=True, show_saved=True)
+            # filename = "compgraph_gpu{}".format(self.rank)
+            # compgraph.filename = filename
+            # compgraph.render()
+
             if torch.cuda.is_available():
                 post_fwd.record()
                 self.pre_fwd_events.append(pre_fwd)
@@ -249,11 +265,16 @@ class Pipeline:
         elif task == 1:
             torch.set_grad_enabled(True)
             output = self.model(inputs_as_dict, recompute=True, handle_comm=True)
+
+            # compgraph = make_dot(output, params=dict(self.model.named_parameters()), show_attrs=True, show_saved=True)
+            # filename = "compgraph_recompute_gpu{}".format(self.rank)
+            # compgraph.filename = filename
+            # compgraph.render()
+
             self.loss = output[0] if isinstance(output,tuple) else output
         
         # backward
         else:
-            print("in backward block of pipeline !")
             grads = torch.ones(self.loss.size(), dtype = torch.float32).to(self.device)
 
             if self.stage == self.partitions - 1:
@@ -266,9 +287,6 @@ class Pipeline:
                             last_partition=(self.stage == self.partitions-1)) as scaled_loss:
                     scaled_loss.backward(grads)
             else:
-                print("calling self.loss.backward")
-                if grads is not None:
-                    print("size of grads is: ", grads.size())
                 self.loss.backward(grads)
 
             del self.loss
