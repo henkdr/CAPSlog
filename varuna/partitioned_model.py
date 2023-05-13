@@ -44,7 +44,6 @@ class CutPoint(Module):
 
         if len(inputs) < 0 or inputs[0] is None:
             if self.pruning:
-                print("IN PARTIOTNED MODEL PRUNING BLOCK..???")
                 inputs = (torch.tensor([-1.0], requires_grad = True))
                 inputs = (inputs,)
             else:
@@ -580,7 +579,7 @@ class PartitionedModel(Module):
 
     def set_recv_fn(self, recompute=False):
         acts = None
-        if recompute: # BAZI TODO: figure out
+        if recompute:
             rng_states, acts = self.recompute_queue.get()
             restore_rng_states(rng_states, self.device)
         else:

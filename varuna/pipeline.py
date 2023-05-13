@@ -152,12 +152,13 @@ class Pipeline:
     
     def grads_receiver(self):
         chunks = len(self.batches)
+        tensors_per_chunk = len(self.bwd_grad_shape)
         dtype = torch.float16 if self.fp16 else torch.float32
         recv_handles = Queue()
 
         for task,index in self.schedule:
             if task == 2:
-                tensors = [None] * len(self.bwd_grad_shape)
+                tensors = [None] * tensors_per_chunk
 
                 for i, bwd_grad_shape in enumerate(self.bwd_grad_shape):
                     if index == (chunks-1) and self.last_chunk_size > 0:
@@ -167,7 +168,7 @@ class Pipeline:
                     tensors[i] = torch.ones(bwd_grad_shape, dtype=dtype)
                     # tag unique to this tensor in this micro-batch
                     # gradient tags are negative
-                    tag_id = -(i + (index *  len(self.bwd_grad_shape)))
+                    tag_id = (chunks * tensors_per_chunk) + (i + (index * tensors_per_chunk))
                     handle = dist.irecv(tensors[i], src=self.send_rank, tag=tag_id)
                     recv_handles.put(handle)
                     
@@ -204,6 +205,9 @@ class Pipeline:
             handle.wait()
 
     def grads_sender(self):
+        chunks = len(self.batches)
+        tensors_per_chunk = len(self.fwd_inp_shape)
+
         count = 0
         for task,index in self.schedule:
             if task == 2:
@@ -214,7 +218,7 @@ class Pipeline:
         while count > 0:
             input_grads = self.grads_send_queue.get()
             for i, grad in enumerate(input_grads):
-                tag_id = -(i + ((indexing_count - count) *  len(self.fwd_inp_shape)))
+                tag_id = (chunks * tensors_per_chunk) + (i + ((indexing_count - count) * tensors_per_chunk))
                 handle = dist.isend(grad.contiguous(), dst=self.receive_rank, tag=tag_id)
                 send_handles.put(handle)
             if send_handles.qsize()>len(input_grads):
