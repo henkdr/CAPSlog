@@ -40,6 +40,8 @@ class CutPoint(Module):
             self.boundary_func()
         
         if self.cp_func is None:
+            if len(inputs) == 1:
+                return inputs[0]
             return inputs
 
         if len(inputs) < 0 or inputs[0] is None:
@@ -79,6 +81,9 @@ class CutPoint(Module):
                 # send activations
                 elif is_in_prev_stage and self.send_fn is not None:
                     self.send_fn(i)
+
+                if len(i) == 1:
+                    return i[0]
                 return i
 
             @staticmethod
@@ -89,6 +94,9 @@ class CutPoint(Module):
                 # send gradients
                 elif is_in_next_stage and self.send_fn is not None:
                     self.send_fn(grad_output, grads = True)
+                
+                if len(grad_output) == 1:
+                    return grad_output[0]
                 return grad_output
 
         c = CutpointFunction()
@@ -247,11 +255,8 @@ class PartitionedModel(Module):
 
         if self.stage_to_cut is None:
             cuts_per_stage = int((self.num_cutpoints + 1)/self.num_stages)
-            if cuts_per_stage == 1:
-                self.stage_to_cut = [i for i in range (0, self.num_stages)]
-            else:
-                self.stage_to_cut = [i for i in range(0, self.num_cutpoints, cuts_per_stage)]
-        assert len(self.stage_to_cut) == self.num_stages, "Stage-to-cut mapping must be number-of-stages long!"
+            self.stage_to_cut = [i for i in range(0, (cuts_per_stage * self.num_stages), cuts_per_stage)]
+        assert len(self.stage_to_cut) == self.num_stages, f"Stage-to-cut mapping: {self.stage_to_cut} must be number-of-stages long: {self.num_stages}!"
         assert self.stage_to_cut[-1] <= self.num_cutpoints, "The last cut index in the stage-to-cut mapping must be smaller than total number of cutpoints"
         if (self.rank == 0):
             print(f"Stage to cut is: {self.stage_to_cut}")
