@@ -226,6 +226,7 @@ class PartitionedModel(Module):
         
         self.grads_send_queue = self.acts_send_queue = None
         self.acts_queue = self.grads_queue = None
+        self.excp_queue = None
         
         if device == "cpu":
             # torch.set_device("cpu")
@@ -257,7 +258,7 @@ class PartitionedModel(Module):
             cuts_per_stage = int((self.num_cutpoints + 1)/self.num_stages)
             self.stage_to_cut = [i for i in range(0, (cuts_per_stage * self.num_stages), cuts_per_stage)]
         assert len(self.stage_to_cut) == self.num_stages, f"Stage-to-cut mapping: {self.stage_to_cut} must be number-of-stages long: {self.num_stages}!"
-        assert self.stage_to_cut[-1] <= self.num_cutpoints, "The last cut index in the stage-to-cut mapping must be smaller than total number of cutpoints"
+        assert self.stage_to_cut[-1] <= self.num_cutpoints, f"The last cut index in the stage-to-cut mapping: {self.stage_to_cut[-1]} must be smaller than total number of cutpoints: {self.num_cutpoints}"
         if (self.rank == 0):
             print(f"Stage to cut is: {self.stage_to_cut}")
 
@@ -559,12 +560,13 @@ class PartitionedModel(Module):
     def set_ret_val(self, val):
         self.ret_val = val
 
-    def set_queues(self, acts_send, grad_send, acts_recv, grad_recv, recompute):
+    def set_queues(self, acts_send, grad_send, acts_recv, grad_recv, recompute, excp):
         self.acts_send_queue = acts_send
         self.grads_send_queue = grad_send
         self.acts_queue = acts_recv
         self.grads_queue = grad_recv
         self.recompute_queue = recompute
+        self.excp_queue = excp
 
     def set_send_fn(self, recompute = False):
         def send(tensor_tuple, grads = False):
@@ -584,19 +586,31 @@ class PartitionedModel(Module):
 
     def set_recv_fn(self, recompute=False):
         acts = None
+        
         if recompute:
             rng_states, acts = self.recompute_queue.get()
             restore_rng_states(rng_states, self.device)
-        else:
-            acts = self.acts_queue.get() if self.stage > 0 else None
+        elif self.stage > 0:
+            while acts is None:
+                if not self.excp_queue.empty():
+                    e = self.excp_queue.get()
+                    raise e
+                if not self.acts_queue.empty():
+                    acts = self.acts_queue.get()
             # acts is a list of tensors or None
         if self.stage > 0:
             acts = tuple(a.to(self.device) for a in acts)
 
         def recv(grads = False):
             if grads:
-                grds = self.grads_queue.get()
-                return tuple(g.to(self.device) for g in grds)
+                grds = None
+                while grds is None:
+                    if not self.excp_queue.empty():
+                        e = self.excp_queue.get()
+                        raise e
+                    if not self.grads_queue.empty():
+                        grds = self.grads_queue.get()
+                        return tuple(g.to(self.device) for g in grds)
             else:
                 return acts
         if self.pre_cp is not None:
@@ -676,7 +690,9 @@ class PartitionedModel(Module):
             ret_val = self.ret_val if self.ret_val is not None else calc_val
         except Exception as e:
             if self.ret_val is None:
+                print(f"Error occurred on GPU {self.rank}: {str(e)}")
                 raise e
+
             ret_val = self.ret_val
         self.ret_val = None
 

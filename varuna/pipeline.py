@@ -48,15 +48,14 @@ class Pipeline:
         # self.spawn_receive_workers()
         self.acts_queue = Queue()
         self.grads_queue = Queue()
-
-
         self.recompute_queue = Queue()
+        self.excp_queue = Queue()
 
         # self.back_start_times = Queue()
 
         # communication queues
         self.partitioned_model.set_queues(self.acts_send_queue, self.grads_send_queue,
-                                          self.acts_queue, self.grads_queue, self.recompute_queue  )
+                                          self.acts_queue, self.grads_queue, self.recompute_queue, self.excp_queue)
 
         # stores output of recompute(/forward) pass to be used by backward()
         self.loss = None
@@ -127,27 +126,31 @@ class Pipeline:
 
         for task,index in self.schedule:
             if task == 0:
-                tensors = [None] * len(self.fwd_inp_shape)
+                try:
+                    tensors = [None] * len(self.fwd_inp_shape)
 
-                for i, fwd_inp_shape in enumerate(self.fwd_inp_shape):
-                    if index == (chunks-1) and self.last_chunk_size > 0:
-                        for d in self.fwd_inp_shape_changes[i]:
-                            fwd_inp_shape[d] = self.last_chunk_size
+                    for i, fwd_inp_shape in enumerate(self.fwd_inp_shape):
+                        if index == (chunks-1) and self.last_chunk_size > 0:
+                            for d in self.fwd_inp_shape_changes[i]:
+                                fwd_inp_shape[d] = self.last_chunk_size
 
-                    tag_id = i + (index *  len(self.fwd_inp_shape))
+                        tag_id = i + (index *  len(self.fwd_inp_shape))
 
-                    tensors[i] = torch.ones(fwd_inp_shape, dtype=dtype)
-                    handle = dist.irecv(tensors[i], src=self.receive_rank, tag=tag_id)
-                    recv_handles.put(handle)
-                
-                # if recv_handles.qsize()>4:
-                #     handle, tensor = recv_handles.get()
-                #     handle.wait()
-                #     self.acts_queue.put(tensor)
-                while not recv_handles.empty():
-                    handle = recv_handles.get()
-                    handle.wait()
-                self.acts_queue.put(tensors)
+                        tensors[i] = torch.ones(fwd_inp_shape, dtype=dtype)
+                        handle = dist.irecv(tensors[i], src=self.receive_rank, tag=tag_id)
+                        recv_handles.put(handle)
+
+                    # if recv_handles.qsize()>4:
+                    #     handle, tensor = recv_handles.get()
+                    #     handle.wait()
+                    #     self.acts_queue.put(tensor)
+                    while not recv_handles.empty():
+                        handle = recv_handles.get()
+                        handle.wait()
+                    self.acts_queue.put(tensors)
+                except Exception as e:
+                    self.excp_queue.put(e)
+                    return
         del tensors
     
     def grads_receiver(self):
@@ -158,28 +161,33 @@ class Pipeline:
 
         for task,index in self.schedule:
             if task == 2:
-                tensors = [None] * tensors_per_chunk
+                try:
+                    tensors = [None] * tensors_per_chunk
 
-                for i, bwd_grad_shape in enumerate(self.bwd_grad_shape):
-                    if index == (chunks-1) and self.last_chunk_size > 0:
-                        for d in self.bwd_grad_shape_changes[i]:
-                            bwd_grad_shape[d] = self.last_chunk_size
+                    for i, bwd_grad_shape in enumerate(self.bwd_grad_shape):
+                        if index == (chunks-1) and self.last_chunk_size > 0:
+                            for d in self.bwd_grad_shape_changes[i]:
+                                bwd_grad_shape[d] = self.last_chunk_size
 
-                    tensors[i] = torch.ones(bwd_grad_shape, dtype=dtype)
-                    # tag unique to this tensor in this micro-batch
-                    # gradient tags are negative
-                    tag_id = (chunks * tensors_per_chunk) + (i + (index * tensors_per_chunk))
-                    handle = dist.irecv(tensors[i], src=self.send_rank, tag=tag_id)
-                    recv_handles.put(handle)
-                    
-                    # if recv_handles.qsize()>4:
-                    #     handle, tensor = recv_handles.get()
-                    #     handle.wait()
-                    #     self.grads_queue.put(tensor)
-                while not recv_handles.empty():
-                    handle = recv_handles.get()
-                    handle.wait()
-                self.grads_queue.put(tensors)
+                        tensors[i] = torch.ones(bwd_grad_shape, dtype=dtype)
+                        # tag unique to this tensor in this micro-batch
+                        # gradient tags are negative
+                        tag_id = (chunks * tensors_per_chunk) + (i + (index * tensors_per_chunk))
+                        handle = dist.irecv(tensors[i], src=self.send_rank, tag=tag_id)
+                        recv_handles.put(handle)
+
+                        # if recv_handles.qsize()>4:
+                        #     handle, tensor = recv_handles.get()
+                        #     handle.wait()
+                        #     self.grads_queue.put(tensor)
+                    while not recv_handles.empty():
+                        handle = recv_handles.get()
+                        handle.wait()
+                    self.grads_queue.put(tensors)
+                except Exception as e:
+                    # in case connection is closed
+                    self.excp_queue.put(e)
+                    return
         del tensors
 
     def acts_sender(self):
@@ -327,7 +335,12 @@ class Pipeline:
             
             if self.verbose:
                 print(f'{self.stage} {self.rank_within_stage} task:{task[0]} {task[1]}/{len(self.batches)}\n', end="")
-            self.worker(task[0], grad_mode, self.batches[task[1]])
+
+            try:
+                self.worker(task[0], grad_mode, self.batches[task[1]])
+            except Exception as e:
+                dist.destroy_process_group()
+                sys.exit("Error occurred, exiting!")
 
             i+=1
         
@@ -347,4 +360,3 @@ class Pipeline:
         self.close_comm_threads()
         dist.barrier()
         return self.average_loss, self.avg_fwd_time
-        
