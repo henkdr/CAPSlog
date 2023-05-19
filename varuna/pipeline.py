@@ -49,13 +49,14 @@ class Pipeline:
         self.acts_queue = Queue()
         self.grads_queue = Queue()
         self.recompute_queue = Queue()
+        self.grads_shape_queue = Queue()
         self.excp_queue = Queue()
 
         # self.back_start_times = Queue()
 
         # communication queues
-        self.partitioned_model.set_queues(self.acts_send_queue, self.grads_send_queue,
-                                          self.acts_queue, self.grads_queue, self.recompute_queue, self.excp_queue)
+        self.partitioned_model.set_queues(self.acts_send_queue, self.grads_send_queue, self.acts_queue,
+                                          self.grads_queue, self.recompute_queue, self.grads_shape_queue, self.excp_queue)
 
         # stores output of recompute(/forward) pass to be used by backward()
         self.loss = None
@@ -118,11 +119,40 @@ class Pipeline:
             self.grads_send_thread = Thread(target=self.grads_sender, args=())
             self.grads_send_thread.daemon=True
             self.grads_send_thread.start() 
+
+    def shape_tensor(self, input_shapes):
+        max_size = max(len(i) for i in input_shapes)
+        # pad to make same length
+        padded_shapes = [shape.copy() for shape in input_shapes]
+        for shape in padded_shapes:
+            while len(shape) < max_size:
+                shape.append(0)
+        return torch.tensor(padded_shapes)
     
+    def shape_setter(self):
+        shape_list = self.grads_shape_queue.get()
+        self.bwd_grad_shape = shape_list
+
+        shape_tensor = self.shape_tensor(shape_list)
+        handle = dist.isend(shape_tensor, dst=self.send_rank, tag=0)
+        handle.wait()
+
     def acts_receiver(self):
         chunks = len(self.batches)
         dtype = torch.float16 if self.fp16 else torch.float32
         recv_handles = Queue()
+
+        max_size = max(len(i) for i in self.fwd_inp_shape)
+        received_shapes = torch.zeros((len(self.fwd_inp_shape), max_size),  dtype=torch.int64)
+        shape_handle = dist.irecv(received_shapes, src=self.receive_rank, tag=0)
+        shape_handle.wait()
+        input_shapes = []
+
+        for idx, shp in enumerate(self.fwd_inp_shape):
+            shape = received_shapes[idx, :len(shp)].tolist()
+            input_shapes.append(shape)
+
+        self.fwd_inp_shape = input_shapes
 
         for task,index in self.schedule:
             if task == 0:
@@ -134,7 +164,7 @@ class Pipeline:
                             for d in self.fwd_inp_shape_changes[i]:
                                 fwd_inp_shape[d] = self.last_chunk_size
 
-                        tag_id = i + (index *  len(self.fwd_inp_shape))
+                        tag_id = 1 + i + (index *  len(self.fwd_inp_shape))
 
                         tensors[i] = torch.ones(fwd_inp_shape, dtype=dtype)
                         handle = dist.irecv(tensors[i], src=self.receive_rank, tag=tag_id)
@@ -159,6 +189,10 @@ class Pipeline:
         dtype = torch.float16 if self.fp16 else torch.float32
         recv_handles = Queue()
 
+        # dynamically set grad shapes; must return before receiving grads
+        # also sends forward input shapes to next process
+        self.shape_setter()
+
         for task,index in self.schedule:
             if task == 2:
                 try:
@@ -172,7 +206,7 @@ class Pipeline:
                         tensors[i] = torch.ones(bwd_grad_shape, dtype=dtype)
                         # tag unique to this tensor in this micro-batch
                         # gradient tags are negative
-                        tag_id = (chunks * tensors_per_chunk) + (i + (index * tensors_per_chunk))
+                        tag_id = 1 + (chunks * tensors_per_chunk) + (i + (index * tensors_per_chunk))
                         handle = dist.irecv(tensors[i], src=self.send_rank, tag=tag_id)
                         recv_handles.put(handle)
 
@@ -201,7 +235,7 @@ class Pipeline:
         while count > 0:
             output_acts = self.acts_send_queue.get() # list of acts
             for i, act in enumerate(output_acts):
-                tag_id = i + ((indexing_count - count) *  len(self.bwd_grad_shape))
+                tag_id = 1 + i + ((indexing_count - count) *  len(self.bwd_grad_shape))
                 handle = dist.isend(act.contiguous(), dst=self.send_rank, tag=tag_id)
                 send_handles.put(handle)
             if send_handles.qsize() > len(output_acts):
@@ -226,7 +260,7 @@ class Pipeline:
         while count > 0:
             input_grads = self.grads_send_queue.get()
             for i, grad in enumerate(input_grads):
-                tag_id = (chunks * tensors_per_chunk) + (i + ((indexing_count - count) * tensors_per_chunk))
+                tag_id = 1 + (chunks * tensors_per_chunk) + (i + ((indexing_count - count) * tensors_per_chunk))
                 handle = dist.isend(grad.contiguous(), dst=self.receive_rank, tag=tag_id)
                 send_handles.put(handle)
             if send_handles.qsize()>len(input_grads):

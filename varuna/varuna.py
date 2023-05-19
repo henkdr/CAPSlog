@@ -110,6 +110,11 @@ class Varuna(Module):
         else:
             self.stage_to_cut = None
 
+        self.batch_size = batch_size // self.data_depth
+        self.micro_batch_size = chunk_size
+        self.last_chunk_size = self.batch_size % chunk_size
+        self.chunks = math.ceil(self.batch_size / self.micro_batch_size)
+
         model_in_cpu = not next(model.parameters()).is_cuda
         assert model_in_cpu, "Model should be on CPU before passing to varuna!"
         # assert isinstance(dummy_inputs, dict), "Sample inputs should be a dictionary!"
@@ -131,7 +136,7 @@ class Varuna(Module):
         self.shared_weights = shared_weights
 
         # partition model based on "CutPoint"s using a dry run with dummy inputs (dict)
-        self.model = PartitionedModel(model, self.rank, self.local_rank, device, self.stage_to_rank_map, self.fp16, self.stage_to_cut, shared_weights)
+        self.model = PartitionedModel(model, self.rank, self.local_rank, device, self.stage_to_rank_map, self.fp16, self.stage_to_cut, self.chunks, shared_weights)
         self.model.initialize( get_batch_fn, from_cache=from_cache )
         self.partitioned_model = self.model
         self.shared_weight_stages = self.model.shared_weight_stages if self.shared_weights is not None else None
@@ -139,9 +144,6 @@ class Varuna(Module):
         print("SHARED WEIGHTS ARE")
         print(self.shared_weight_stages)
 
-        self.batch_size = batch_size // self.data_depth
-        self.micro_batch_size = chunk_size
-        self.last_chunk_size = self.batch_size % chunk_size 
         self.init_communication()
 
         self.model.to(self.device)        
@@ -169,7 +171,6 @@ class Varuna(Module):
             "rank_within_stage": self.rank_within_stage
         }
 
-        self.chunks = math.ceil(self.batch_size / self.micro_batch_size)
         self.schedule = utils.generate_schedule(self.chunks, self.stage, self.partitions)
         self.iteration = 0
         self.current_step = 0

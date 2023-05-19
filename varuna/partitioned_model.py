@@ -23,11 +23,16 @@ class CutPoint(Module):
         self.device = None
         self.send_fn = self.recv_fn = None
         self.stage = -1
+        self.num_chunks = -1
+        self.num_stages = -1
         self.fp16 = False
         self.pruning = False
         self.barrier_event = None
         self.boundary_func = None
         self.forward_input_shapes = None
+
+        self.set_shapes = None
+        self.forward_counter = 0
     
     def set_pruning(self, boolean):
         self.pruning = boolean
@@ -56,6 +61,16 @@ class CutPoint(Module):
                 inputs = tuple(tensor_inputs)
 
         if isinstance(self.cp_func, torch.autograd.Function):
+            if self.cp_index == self.stage + 1 and self.stage != self.num_stages-1:
+                # New pipeline/iteration: dynamically set shapes of communicated tensors
+                if self.forward_counter%(2 * self.num_chunks) == 0:
+                    self.forward_counter = 0
+                    # my own bwd grad shapes and next gpu's fwd shapes.
+                    inp_shapes = [list(i.size()) for i in inputs]
+                    self.set_shapes(inp_shapes)
+
+                self.forward_counter += 1
+
             out = self.cp_func.apply(*inputs, **kwargs)            
             if self.cp_index == (self.stage + 1):
                 self.set_ret_val_func(out) 
@@ -212,7 +227,7 @@ def read_dry_run_out(model):
 
 class PartitionedModel(Module):
 
-    def __init__(self, module, rank, local_rank, device, stage_to_rank_map, fp16, stage_to_cut, shared_weights=None):
+    def __init__(self, module, rank, local_rank, device, stage_to_rank_map, fp16, stage_to_cut, chunks, shared_weights=None):
         super(PartitionedModel, self).__init__()
         self.module = module
         self.num_stages = len(stage_to_rank_map)
@@ -221,12 +236,13 @@ class PartitionedModel(Module):
         self.local_rank = local_rank
         self.fp16 = fp16
         self.shared_weights = shared_weights
+        self.chunks = chunks
 
         self.stage_to_cut = stage_to_cut
         
         self.grads_send_queue = self.acts_send_queue = None
         self.acts_queue = self.grads_queue = None
-        self.excp_queue = None
+        self.excp_queue = self.grads_shape_queue = None
         
         if device == "cpu":
             # torch.set_device("cpu")
@@ -420,6 +436,9 @@ class PartitionedModel(Module):
             cutpoint.device = self.device
             cutpoint.fp16 = self.fp16
             cutpoint.bwd_req_grads = bwd_req_grads
+            cutpoint.num_chunks = self.chunks
+            cutpoint.num_stages = self.num_stages
+            cutpoint.set_shapes = self.set_shapes
             cutpoint.set_cp_func()
 
         # self.cuts_per_stage = (self.num_cutpoints + 1) // self.num_stages
@@ -560,13 +579,18 @@ class PartitionedModel(Module):
     def set_ret_val(self, val):
         self.ret_val = val
 
-    def set_queues(self, acts_send, grad_send, acts_recv, grad_recv, recompute, excp):
+    def set_queues(self, acts_send, grad_send, acts_recv, grad_recv, recompute, shapes, excp):
         self.acts_send_queue = acts_send
         self.grads_send_queue = grad_send
         self.acts_queue = acts_recv
         self.grads_queue = grad_recv
         self.recompute_queue = recompute
+        self.grads_shape_queue = shapes
         self.excp_queue = excp
+
+    def set_shapes(self, shapes):
+        # shapes is a list, not a tensor
+        self.grads_shape_queue.put(shapes)
 
     def set_send_fn(self, recompute = False):
         def send(tensor_tuple, grads = False):
@@ -586,7 +610,7 @@ class PartitionedModel(Module):
 
     def set_recv_fn(self, recompute=False):
         acts = None
-        
+
         if recompute:
             rng_states, acts = self.recompute_queue.get()
             restore_rng_states(rng_states, self.device)
