@@ -197,14 +197,12 @@ class Varuna(Module):
             for idx, lst in enumerate(self.fwd_inp_shape_changes):
                 for i in lst:
                     self.fwd_inp_shape[idx][i] =  self.micro_batch_size
-            print("Varuna.py line 199: fwd_inp_shape: ", self.fwd_inp_shape)
         if self.stage < (self.partitions-1):
             self.bwd_grad_shape = self.model.backward_grad_shapes
             self.bwd_grad_shape_changes = self.model.bwd_grad_shape_changes
             for idx, lst in enumerate(self.bwd_grad_shape_changes):
                 for i in lst:
                     self.bwd_grad_shape[idx][i] = self.micro_batch_size
-            print("Varuna.py line 205: bwd_grad_shape: ", self.bwd_grad_shape)
 
     def init_distributed(self):
         # create same process groups on all ranks
@@ -231,8 +229,12 @@ class Varuna(Module):
             if len(ranks) > 1:
                 pipeline_groups[replica] = dist.new_group(ranks=ranks)
                 if self.shared_weight_stages:
-                    recv_stage, send_stage = self.shared_weight_stages[0] # BAZI: should this be hard-coded to only index 0?
-                    tied_ranks = [ranks[recv_stage], ranks[send_stage]]
+                    print("shared weight stages = ", self.shared_weight_stages)
+                    tied_ranks = []
+                    for stage in self.shared_weight_stages[0]: # BAZI HARD CODED 0 !!!!
+                        if ranks[stage] not in tied_ranks:
+                            tied_ranks.append(ranks[stage])
+                    print("tied ranks = ", tied_ranks)
                     tied_groups[replica] = dist.new_group(ranks=tied_ranks)
                 else:
                     tied_groups[replica] = None
@@ -536,25 +538,31 @@ class Varuna(Module):
 
     def share_weight_grads(self):
         parameter_names = self.parameter_names
-        rank_within_stage = self.rank_within_stage
+        rank_within_stage = self.rank_within_stage # = replica nr... without dp it is 0
+
         for i,w in enumerate(self.shared_weights):
-            recv_stage, send_stage = self.shared_weight_stages[i]
-            recv_wt_name, send_wt_name = w
-            recv_weight, send_weight = None, None
-            for p in parameter_names:
-                if parameter_names[p] == send_wt_name:
-                    send_weight = p
-                if parameter_names[p] == recv_wt_name:
-                    recv_weight = p
-            if recv_stage == send_stage and self.stage == recv_stage:
-                if recv_weight.data_ptr() != send_weight.data_ptr():
-                    recv_weight.grad.add_(send_weight.grad)
-                    send_weight.grad.data.copy_(recv_weight.grad.data)
-                continue
-            if self.stage == send_stage:
-                dist.all_reduce(send_weight.grad.data, group=self.tied_group)
-            elif self.stage == recv_stage:
-                dist.all_reduce(recv_weight.grad.data, group=self.tied_group)
+            stages = set(self.shared_weight_stages[i]) # removes duplicates
+            if self.stage in stages:
+                my_params = []
+                for p in parameter_names:
+                    if parameter_names[p] in w:
+                        my_params.append(p)
+
+                # local variable to collect all values to be reduced
+                accumulated_grad = torch.zeros_like(my_params[0].grad)
+                for p in my_params:
+                    if p.grad is not None:
+                        accumulated_grad.add_(p.grad)
+
+                # share accumulated grad
+                if len(stages) > 1:
+                    # BAZI: assumes only one group of shared params. oke for DETR but in general not for more complex models !
+                    dist.all_reduce(accumulated_grad.data, group=self.tied_group)
+
+                # update my parameters with allreduced value
+                for p in my_params:
+                    if p.grad is not None:
+                        p.grad.data.copy_(accumulated_grad.data)
 
     def all_reduce_dp_grads(self, params):
         allred_init_start = time.time()
@@ -664,22 +672,21 @@ class Varuna(Module):
 
         return overflow_buf, global_grad_norm, loss_tensor.item()
         
+    # if a weight has been shared between stages, return the square of the grad (once!!)
     def extra_grad_norm_sq(self):
         extra_norm_sq = 0.0
         for i,w in enumerate(self.shared_weights):
-            recv_stage, send_stage = self.shared_weight_stages[i]
-            recv_wt_name, send_wt_name = w
-            recv_weight, send_weight = None, None
+            stages = set(self.shared_weight_stages[i])
+            my_params = []
             for p in self.parameter_names:
-                if self.parameter_names[p] == send_wt_name:
-                    send_weight = p
-                if self.parameter_names[p] == recv_wt_name:
-                    recv_weight = p
-            if recv_stage == send_stage:
-                if self.stage == recv_stage and recv_weight.data_ptr() == send_weight.data_ptr():
-                    continue
-            if self.stage == send_stage:
-                if send_weight.grad is not None:
-                    extra_norm_sq += torch.norm(send_weight.grad) ** 2
+                if self.parameter_names[p] in w:
+                    my_params.append(p)
+
+            if len(stages) > 1:
+                if self.stage == max(stages):
+                    for param in my_params:
+                        if param.grad is not None:
+                            extra_norm_sq += torch.norm(param.grad) ** 2
+                            break
 
         return extra_norm_sq

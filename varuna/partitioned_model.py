@@ -174,8 +174,6 @@ def dry_run(model, get_batch, from_cache):
                 d2 = shape_2[i]
                 if d1 == 1 and d2 == 2:
                     indices_to_change.append(i) # batch-size index
-                else:
-                    assert d1 == d2 # all other dimension sizes should be the same
             shape_indices_to_change[name].append(indices_to_change) # append list of indices of batch-size-sensitive dimensions for tensor at idx
 
     for h in hooks:
@@ -420,8 +418,8 @@ class PartitionedModel(Module):
                         weight_stages[w] = s
                         break
                 # weight_stages[w] = int(weight_stages[w] // cuts_per_stage)
-            shared_weight_stages.append((weight_stages[w_pair[0]], weight_stages[w_pair[1]]))
 
+            shared_weight_stages.append(tuple(weight_stages[w_pair[i]] for i in range(len(w_pair))))
         self.shared_weight_stages = shared_weight_stages
 
 

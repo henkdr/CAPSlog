@@ -170,10 +170,6 @@ class Pipeline:
                         handle = dist.irecv(tensors[i], src=self.receive_rank, tag=tag_id)
                         recv_handles.put(handle)
 
-                    # if recv_handles.qsize()>4:
-                    #     handle, tensor = recv_handles.get()
-                    #     handle.wait()
-                    #     self.acts_queue.put(tensor)
                     while not recv_handles.empty():
                         handle = recv_handles.get()
                         handle.wait()
@@ -205,15 +201,10 @@ class Pipeline:
 
                         tensors[i] = torch.ones(bwd_grad_shape, dtype=dtype)
                         # tag unique to this tensor in this micro-batch
-                        # gradient tags are negative
                         tag_id = 1 + (chunks * tensors_per_chunk) + (i + (index * tensors_per_chunk))
                         handle = dist.irecv(tensors[i], src=self.send_rank, tag=tag_id)
                         recv_handles.put(handle)
 
-                        # if recv_handles.qsize()>4:
-                        #     handle, tensor = recv_handles.get()
-                        #     handle.wait()
-                        #     self.grads_queue.put(tensor)
                     while not recv_handles.empty():
                         handle = recv_handles.get()
                         handle.wait()
