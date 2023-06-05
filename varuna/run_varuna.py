@@ -54,6 +54,8 @@ def get_launch_cmd_format(args):
         +  f" --chunk_size {args.chunk_size} --code_dir {args.code_dir}")
     if args.stage_to_cut is not None:
         launch_cmd.append(f"--stage_to_cut {args.stage_to_cut}")
+    if args.profiling_stages is not None:
+        launch_cmd.append(f"--profiling_stages {args.profiling_stages}")
     launch_cmd.append(args.training_script)
     launch_cmd.extend(args.training_script_args)
     launch_cmd = " ".join(launch_cmd)
@@ -105,6 +107,8 @@ def parse_args():
                         help="Resume a varuna run.")
     parser.add_argument("--stage_to_cut", default=None, type=str,
                         help = "stage to cutpoint map of Varuna model")
+    parser.add_argument('--profiling_stages', type=str, default=None,
+                        help="Stages to keep intact for profiling")
 
     parser.add_argument("training_script", type=str, default=None, nargs='?',
                         help="The full path to the single GPU training "
@@ -203,3 +207,4 @@ if __name__ == "__main__":
                     p.kill()
     except Exception as e:
         print("run_varuna quit with error:", e)
+

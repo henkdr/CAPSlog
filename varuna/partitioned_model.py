@@ -30,6 +30,8 @@ class CutPoint(Module):
         self.barrier_event = None
         self.boundary_func = None
         self.forward_input_shapes = None
+        self.dummy_shapes = None
+        self.trimmed = False
 
         self.set_shapes = None
         self.forward_counter = 0
@@ -48,6 +50,13 @@ class CutPoint(Module):
             if len(inputs) == 1:
                 return inputs[0]
             return inputs
+
+        if self.trimmed: # BAZI TODO: MIGHT NOT BE NECESSARY...
+            dtype = torch.float16 if self.fp16 else torch.float32
+            dummy_inputs = []
+            for i,shape in enumerate(self.dummy_shapes):
+                dummy_inputs.append(torch.rand(*shape, requires_grad = self.bwd_req_grads[i], dtype=dtype).to(self.device))
+            inputs = tuple(dummy_inputs)
 
         if len(inputs) < 0 or inputs[0] is None:
             if self.pruning:
@@ -70,8 +79,7 @@ class CutPoint(Module):
                     self.set_shapes(inp_shapes)
 
                 self.forward_counter += 1
-
-            out = self.cp_func.apply(*inputs, **kwargs)            
+            out = self.cp_func.apply(*inputs)
             if self.cp_index == (self.stage + 1):
                 self.set_ret_val_func(out) 
             return out
@@ -87,12 +95,12 @@ class CutPoint(Module):
 
             @staticmethod
             def forward(ctx, *i):
-                # for idx, tens in enumerate(i):
-                #     print(f"input nr {idx} requires_grad = {tens.requires_grad}")
-
                 # recieve activations
                 if is_in_next_stage and self.recv_fn is not None:
                     i = self.recv_fn()
+                    if self.trimmed:
+                        return torch.rand(1, requires_grad=True).to(self.device) # DUMMY LOSS FOR PROFILING
+
                 # send activations
                 elif is_in_prev_stage and self.send_fn is not None:
                     self.send_fn(i)
@@ -103,13 +111,20 @@ class CutPoint(Module):
 
             @staticmethod
             def backward(ctx, *grad_output):
+                if self.trimmed:
+                    # PyTorch requires that backward function returns same number of values that Forward was called with
+                    dummies = []
+                    for i,shape in enumerate(self.dummy_shapes):
+                        dummies.append(torch.rand(*shape, requires_grad=True).to(self.device))
+                    grad_output = tuple(dummies)
+
                 # receive gradients.
                 if is_in_prev_stage and self.recv_fn is not None:
                     grad_output = self.recv_fn(grads = True)
                 # send gradients
                 elif is_in_next_stage and self.send_fn is not None:
                     self.send_fn(grad_output, grads = True)
-                
+
                 if len(grad_output) == 1:
                     return grad_output[0]
                 return grad_output
@@ -189,11 +204,6 @@ def dry_run(model, get_batch, from_cache):
     with open("_tmp_inp_grads",'wb') as f:
         pickle.dump(input_gradients,f)
 
-    print("DRY RUN RESULTS: ")
-    print("input_shapes: ", input_shapes)
-    print("shape_indices_to_change: ", shape_indices_to_change)
-    print("input_gradients: ", input_gradients)
-
     return ordered_modules, input_shapes, \
             shape_indices_to_change, input_gradients, num_cutpoints
 
@@ -225,7 +235,7 @@ def read_dry_run_out(model):
 
 class PartitionedModel(Module):
 
-    def __init__(self, module, rank, local_rank, device, stage_to_rank_map, fp16, stage_to_cut, chunks, shared_weights=None):
+    def __init__(self, module, rank, local_rank, device, stage_to_rank_map, fp16, stage_to_cut, chunks, shared_weights=None, profiling_stages=None):
         super(PartitionedModel, self).__init__()
         self.module = module
         self.num_stages = len(stage_to_rank_map)
@@ -237,7 +247,7 @@ class PartitionedModel(Module):
         self.chunks = chunks
 
         self.stage_to_cut = stage_to_cut
-        
+
         self.grads_send_queue = self.acts_send_queue = None
         self.acts_queue = self.grads_queue = None
         self.excp_queue = self.grads_shape_queue = None
@@ -261,6 +271,12 @@ class PartitionedModel(Module):
         else:
             raise ValueError("Rank " + self.rank + " not found in stage to rank map!")
 
+        if profiling_stages is not None:
+            self.profiling_stages = [int(i) for i in profiling_stages.split(',')]
+        else:
+            self.profiling_stages = None
+
+        self.trimmed = False
         # self.logfile = open("wait_logs" + str(self.rank),"w")
 
     def initialize(self, get_batch_fn, from_cache=False):
@@ -273,16 +289,27 @@ class PartitionedModel(Module):
             self.stage_to_cut = [i for i in range(0, (cuts_per_stage * self.num_stages), cuts_per_stage)]
         assert len(self.stage_to_cut) == self.num_stages, f"Stage-to-cut mapping: {self.stage_to_cut} must be number-of-stages long: {self.num_stages}!"
         assert self.stage_to_cut[-1] <= self.num_cutpoints, f"The last cut index in the stage-to-cut mapping: {self.stage_to_cut[-1]} must be smaller than total number of cutpoints: {self.num_cutpoints}"
-        if (self.rank == 0):
-            print(f"Stage to cut is: {self.stage_to_cut}")
+        assert all(self.stage_to_cut[i] < self.stage_to_cut[i+1] for i in range(self.num_stages-1))
+        print(f"Stage to cut is: {self.stage_to_cut}")
 
         if self.shared_weights is not None:
             self.find_shared_weight_stages()
         print("dry run time", time.time() - start)
+
+        if self.profiling_stages:
+            if not self.stage in self.profiling_stages:
+                self.trimmed = True
+                print('PROFILING MODE; TRIMMED STAGE', force=True)
+            else:
+                if self.stage != self.num_stages - 1:
+                    upper_cut = self.stage_to_cut[self.stage+1]
+                else:
+                    upper_cut = self.num_cutpoints
+                print(f'THIS STAGE IS PROFILING BETWEEN CUTPOINTS {self.stage_to_cut[self.stage]} AND {upper_cut}', force=True)
+
         self.prep_cutpoints()
         self.remove_unused_parameters()
         self.model_pruned = True
-
 
     def dry_run(self, get_batch, from_cache):
 
@@ -437,6 +464,11 @@ class PartitionedModel(Module):
             cutpoint.num_chunks = self.chunks
             cutpoint.num_stages = self.num_stages
             cutpoint.set_shapes = self.set_shapes
+            cutpoint.trimmed = self.trimmed
+            if len(self.backward_grad_shapes) > 0:
+                cutpoint.dummy_shapes = self.backward_grad_shapes
+            else:
+                cutpoint.dummy_shapes = self.forward_input_shapes
             cutpoint.set_cp_func()
 
         # self.cuts_per_stage = (self.num_cutpoints + 1) // self.num_stages
@@ -471,9 +503,16 @@ class PartitionedModel(Module):
             # found all relevant cutpoints, break
             if assigned_index == self.num_stages:
                 break
-        
+
     # """ remove unused modules to save memory. """
     def remove_unused_parameters(self):
+
+        if self.trimmed: # BAZI TODO: case where there are consecutive trimmed stages
+            if self.stage < self.profiling_stages[0]:
+                self.module = self.post_cp
+            else:
+                self.module = self.pre_cp
+            return
 
         pre_cp_index = self.stage
         post_cp_index = self.stage + 1
@@ -588,13 +627,28 @@ class PartitionedModel(Module):
 
     def set_shapes(self, shapes):
         # shapes is a list, not a tensor
-        self.grads_shape_queue.put(shapes)
+        if self.trimmed:
+            self.grads_shape_queue.put(self.backward_grad_shapes)
+        else:
+            self.grads_shape_queue.put(shapes)
 
     def set_send_fn(self, recompute = False):
+
         def send(tensor_tuple, grads = False):
             sendlist = []
-            for tensor in tensor_tuple:
-                sendlist.append(tensor.cpu())
+
+            if self.trimmed:
+                if not grads:
+                    shapes = self.backward_grad_shapes
+                else:
+                    shapes = self.forward_input_shapes
+                dtype = torch.float16 if self.fp16 else torch.float32
+                for i,shape in enumerate(shapes):
+                    dummy = torch.rand(*shape, requires_grad=True, dtype=dtype)
+                    sendlist.append(dummy)
+            else:
+                for tensor in tensor_tuple:
+                    sendlist.append(tensor.cpu())
             if grads:
                 self.grads_send_queue.put(sendlist)
             else:
@@ -712,7 +766,7 @@ class PartitionedModel(Module):
             ret_val = self.ret_val if self.ret_val is not None else calc_val
         except Exception as e:
             if self.ret_val is None:
-                print(f"Error occurred on GPU {self.rank}: {str(e)}")
+                print(f"Error occurred on GPU {self.rank}: {str(e)}\n", flush=True, force=True)
                 raise e
 
             ret_val = self.ret_val
@@ -729,7 +783,7 @@ class PartitionedModel(Module):
             ctx = (rng_states, recv_acts)
             self.recompute_queue.put(ctx)
 
-        return ret_val 
+        return ret_val
 
 
 class PassThroughModule(Module):

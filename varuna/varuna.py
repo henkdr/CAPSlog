@@ -91,7 +91,8 @@ class Varuna(Module):
                 local_rank=-1,
                 device=-1,
                 shared_weights=None,
-                from_cache=True):
+                from_cache=True,
+                profiling_stages=None):
         super().__init__()
 
         self.rank = dist.get_rank()
@@ -100,6 +101,7 @@ class Varuna(Module):
         self.partitions, self.data_depth = utils.get_varuna_config(stage_to_rank_map)
         self.stage, self.rank_within_stage = utils.get_this_rank_config_varuna(stage_to_rank_map, self.rank)
         self.manager_ip, self.manager_port = utils.get_heartbeat_server_info()
+        self.profiling = profiling_stages is not None
 
         if self.stage == -1:
             raise ValueError("Rank " + str(self.rank) + " not found in stage to rank map!")
@@ -117,11 +119,6 @@ class Varuna(Module):
 
         model_in_cpu = not next(model.parameters()).is_cuda
         assert model_in_cpu, "Model should be on CPU before passing to varuna!"
-        # assert isinstance(dummy_inputs, dict), "Sample inputs should be a dictionary!"
-        # for key in dummy_inputs:
-        #     val = dummy_inputs[key]
-        #     if isinstance(val, torch.Tensor) and val.is_cuda:
-        #         dummy_inputs[key] = val.cpu()
 
         if device == -1:
             device = self.local_rank
@@ -136,7 +133,7 @@ class Varuna(Module):
         self.shared_weights = shared_weights
 
         # partition model based on "CutPoint"s using a dry run with dummy inputs (dict)
-        self.model = PartitionedModel(model, self.rank, self.local_rank, device, self.stage_to_rank_map, self.fp16, self.stage_to_cut, self.chunks, shared_weights)
+        self.model = PartitionedModel(model, self.rank, self.local_rank, device, self.stage_to_rank_map, self.fp16, self.stage_to_cut, self.chunks, shared_weights, profiling_stages)
         self.model.initialize( get_batch_fn, from_cache=from_cache )
         self.partitioned_model = self.model
         self.shared_weight_stages = self.model.shared_weight_stages if self.shared_weights is not None else None
@@ -145,8 +142,7 @@ class Varuna(Module):
         print(self.shared_weight_stages)
 
         self.init_communication()
-
-        self.model.to(self.device)        
+        self.model.to(self.device)
         self.init_distributed()
         self.configure_checkpointing()
 
@@ -291,8 +287,10 @@ class Varuna(Module):
 
         if log_verbose:
             print(f'{self.stage} {self.rank_within_stage} going to share embedding grads')
+            allocated_peak = torch.cuda.max_memory_allocated()
+            print("peak allocated after pipeline returns: ", allocated_peak, force=True)
         
-        if self.shared_weights is not None:
+        if self.shared_weights is not None and not self.profiling:
             embed_comm_start = time.time()
             self.share_weight_grads()
             embed_comm_time = time.time() - embed_comm_start
@@ -302,12 +300,12 @@ class Varuna(Module):
             print(f'{self.rank} {self.rank_within_stage} all-reduce')
 
         sync_start_time = time.time()
-        if self.fp16 or (self.data_depth > 1) or (self.partitions > 1):
+        if not self.profiling and (self.fp16 or (self.data_depth > 1) or (self.partitions > 1)):
             overflow, grad_norm = self.sync_across_workers(clip_grad_max_norm)
         else:
             overflow = False; grad_norm = 1
         sync_time =  time.time() - sync_start_time
-    
+
         if log_verbose:
             print(f'{self.rank} {self.rank_within_stage} all-reduce done;')
 
@@ -325,7 +323,6 @@ class Varuna(Module):
         # if self.rank == 0 and self.iteration%5==0:
         #     message = "progress {} {}".format(batch_time, self.iteration)
         #     utils.heartbeat(message, self.manager_ip, self.manager_port)
-
         return self.average_loss, overflow, grad_norm
 
     def get_status(self):
@@ -570,13 +567,11 @@ class Varuna(Module):
         flat_grad_size = sum(p.numel() for p in master_grads)
         flat_raw = torch.empty( flat_grad_size, device=self.device, 
                                 dtype=torch.float16 if self.fp16 else torch.float32)
-
         if self.fp16:        
             scaler = _amp_state.loss_scalers[0]
             loss_scale = scaler.loss_scale()
         else:
             loss_scale = 1
-
         allreduced_views = apex_C.unflatten(flat_raw, master_grads)
         overflow_buf = torch.cuda.IntTensor([0])
         amp_C.multi_tensor_scale(65536,
@@ -603,7 +598,6 @@ class Varuna(Module):
         return master_grads, overflow_buf
 
     def sync_across_workers(self, max_norm):
-
         if self.fp16:
             params = list(amp.master_params(self.optimizer))
         else:
@@ -639,8 +633,7 @@ class Varuna(Module):
 
 
     """ reduces overflow, norm and loss across pipeline stages """
-    def all_reduce_pipeline_meta(self, master_grads, overflow_buf=None):
-        
+    def all_reduce_pipeline_meta(self, master_grads, overflow_buf=None):        
         local_grad_norm = multi_tensor_applier(amp_C.multi_tensor_l2norm,
                                              torch.cuda.IntTensor([0]),
                                              [master_grads], False)[0]
