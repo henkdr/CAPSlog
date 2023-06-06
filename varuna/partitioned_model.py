@@ -51,7 +51,7 @@ class CutPoint(Module):
                 return inputs[0]
             return inputs
 
-        if self.trimmed: # BAZI TODO: MIGHT NOT BE NECESSARY...
+        if self.trimmed:
             dtype = torch.float16 if self.fp16 else torch.float32
             dummy_inputs = []
             for i,shape in enumerate(self.dummy_shapes):
@@ -453,7 +453,7 @@ class PartitionedModel(Module):
     # """ setting actual cutpoint functions for comunication. """
     def prep_cutpoints(self):
 
-        def attach_meta(cutpoint, index, bwd_req_grads):
+        def attach_meta(cutpoint, index, bwd_req_grads, shapes):
             cutpoint.cp_index = index
             cutpoint.num_stages = self.num_stages
             cutpoint.set_ret_val_func = self.set_ret_val
@@ -465,10 +465,7 @@ class PartitionedModel(Module):
             cutpoint.num_stages = self.num_stages
             cutpoint.set_shapes = self.set_shapes
             cutpoint.trimmed = self.trimmed
-            if len(self.backward_grad_shapes) > 0:
-                cutpoint.dummy_shapes = self.backward_grad_shapes
-            else:
-                cutpoint.dummy_shapes = self.forward_input_shapes
+            cutpoint.dummy_shapes = shapes
             cutpoint.set_cp_func()
 
         # self.cuts_per_stage = (self.num_cutpoints + 1) // self.num_stages
@@ -497,7 +494,7 @@ class PartitionedModel(Module):
                         self.backward_grad_shapes = self.input_shapes[name]
                         self.bwd_grad_shape_changes = self.shape_indices_to_change[name]
                         self.post_cp = module
-                    attach_meta(module, assigned_index, self.input_gradients[name])
+                    attach_meta(module, assigned_index, self.input_gradients[name], self.input_shapes[name])
                     assigned_index += 1  
                 index += 1
             # found all relevant cutpoints, break
@@ -745,7 +742,7 @@ class PartitionedModel(Module):
         return times
 
     def forward(self, inputs_as_dict, recompute=False, save_ctx=False, 
-                recording=False, handle_comm=False):        
+                recording=False, handle_comm=False):
         if save_ctx:
             # if these acts are going to be recomputed
             rng_states = save_rng_states(self.device)

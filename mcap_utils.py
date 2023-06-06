@@ -43,6 +43,24 @@ def evenly_distribute_fill(n_gpus, n_layers, l_per_gpu):
 def fill(n_gpus, l_per_gpu):
     return [l_per_gpu] * n_gpus
 
+def get_trimmed_partitionings(n_layers):
+    if n_layers < 6:
+        raise ValueError("For profiling, n_layers must be >= 2 * n_gpus - 2")
+
+    first_partitioning = [1,1,(n_layers-2)]  # fill to 4 GPUs
+    second_partitioning = [2,1,(n_layers-3)]
+    partitionings = [first_partitioning, second_partitioning]
+
+    for layer in range(1, n_layers - 3):
+        partitioning = [layer,2,1,(n_layers - layer - 3)]
+        partitionings.append(partitioning)
+
+    last_partitioning = [n_layers - 3, 2, 1]
+    partitionings.append(last_partitioning)
+
+    return partitionings
+
+
 def get_mCAP_partitionings(n_gpus, n_layers):
     if n_layers < 2 * n_gpus - 2:
         raise ValueError("For profiling, n_layers must be >= 2 * n_gpus - 2")
@@ -118,7 +136,7 @@ def convert_to_forward_layers(partitionings):
 # be extracted from the generated profiling partitionings.
 def main(n_gpus, n_layers):
     print("Predicting for", n_gpus, "gpus and", n_layers, "layers")
-    ps = get_mCAP_partitionings(n_gpus, n_layers)
+    ps = get_trimmed_partitionings(n_layers)
 
     for p in ps: print(p, sum(p))
 
@@ -140,4 +158,4 @@ def main(n_gpus, n_layers):
     do_completeness_check(results, n_layers)
 
 if __name__ == "__main__":
-    main(n_gpus=8, n_layers=24)
+    main(n_gpus=4, n_layers=48)

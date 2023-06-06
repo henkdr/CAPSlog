@@ -190,25 +190,15 @@ def get_local_varuna_pid():
 
 def report_memory(name, rank):
     """Simple GPU memory report."""
-    mega_bytes = 1024.0 * 1024.0
-
-    # allocated = torch.cuda.memory_allocated() / mega_bytes
-    # max_allocated = torch.cuda.max_memory_allocated() / mega_bytes
-    # reserved = torch.cuda.memory_reserved() / mega_bytes
-    # max_reserved = torch.cuda.max_memory_reserved() / mega_bytes
-
-    stats = torch.cuda.memory_stats()
-    allocated_peak = stats["allocated_bytes.all.peak"]
-    reserved_peak = stats["reserved_bytes.all.peak"]
+    allocated_peak = torch.cuda.max_memory_allocated()
+    reserved_peak = torch.cuda.max_memory_reserved()
 
     string = 'Memory allocated on rank {} '.format(rank)
     string += name
-    # string += ' | allocated: {}'.format(allocated)
     string += ' | peak allocated: {}'.format(allocated_peak)
-    # string += ' | reserved: {}'.format(reserved)
     string += ' | peak reserved: {}'.format(reserved_peak)
     
-    print(string)
+    print(string, force=True)
     torch.cuda.reset_peak_memory_stats()
 
     return (allocated_peak, reserved_peak)

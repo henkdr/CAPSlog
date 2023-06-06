@@ -267,7 +267,7 @@ class Pipeline:
             self.acts_receive_thread.join()
         if self.grads_receive_thread is not None:
             self.grads_receive_thread.join()
-        
+
         if self.acts_send_thread is not None:
             self.acts_send_thread.join()
         if self.grads_send_thread is not None:
@@ -359,13 +359,16 @@ class Pipeline:
                     grad_mode=True
             
             if self.verbose:
-                print(f'{self.stage} {self.rank_within_stage} task:{task[0]} {task[1]}/{len(self.batches)}\n', end="")
+                allocated_peak = torch.cuda.max_memory_allocated()
+                print("PEAK ALLOCATED: ", allocated_peak, force=True)
+                print(f'{self.stage} {self.rank_within_stage} task:{task[0]} {task[1]}/{len(self.batches)}\n', end="", force=True)
 
             try:
                 self.worker(task[0], grad_mode, self.batches[task[1]])
             except Exception as e:
+                raise e
                 dist.destroy_process_group()
-                sys.exit("Error occurred, exiting!")
+                sys.exit("Error occurred, exiting!", force=True)
 
             i+=1
         
