@@ -297,15 +297,14 @@ class PartitionedModel(Module):
         print("dry run time", time.time() - start)
 
         if self.profiling_stages:
+            print(f"PROFILING MODE; Profiling stages: {self.profiling_stages}")
             if not self.stage in self.profiling_stages:
                 self.trimmed = True
-                print('PROFILING MODE; TRIMMED STAGE', force=True)
             else:
                 if self.stage != self.num_stages - 1:
                     upper_cut = self.stage_to_cut[self.stage+1]
                 else:
                     upper_cut = self.num_cutpoints
-                print(f'THIS STAGE IS PROFILING BETWEEN CUTPOINTS {self.stage_to_cut[self.stage]} AND {upper_cut}', force=True)
 
         self.prep_cutpoints()
         self.remove_unused_parameters()
