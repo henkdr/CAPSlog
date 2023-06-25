@@ -3,13 +3,13 @@ from argparse import ArgumentParser, REMAINDER
 from mcap_utils import get_trimmed_partitionings
 
 def get_varuna_partitionings(n_layers, n_gpus):
-    mcap_partitionings = get_trimmed_partitionings(n_layers)
+    mcap_partitionings, profiling_stages = get_trimmed_partitionings(n_gpus, n_layers)
     varuna_partitionings = convert_to_varuna_cutpoints(mcap_partitionings)
 
     for partitioning in varuna_partitionings:
         assert len(partitioning) <= n_gpus, "partitioning must have max n_gpus-many stages"
     
-    return varuna_partitionings
+    return varuna_partitionings, profiling_stages
 
 def convert_to_varuna_cutpoints(mcap_partitionings):
     cps = []
@@ -47,18 +47,12 @@ def launch_cmd(args, partitioning, contentful_stages):
 
 def main(args):
     n_layers = args.n_cutpoints + 1
-    partitionings = get_varuna_partitionings(n_layers, args.n_gpus)
+    partitionings, profiling_stages = get_varuna_partitionings(n_layers, args.n_gpus)
 
     current_env = os.environ.copy()
     processes = []    
     for i, partitioning in enumerate(partitionings):
-        if i == 0 or i == 1:
-            contentful_stages = [0,1]
-        elif i == len(partitionings)-1:
-            contentful_stages = [2,3]
-        else:
-            contentful_stages = [1,2]
-        cmd = launch_cmd(args, partitioning, contentful_stages)
+        cmd = launch_cmd(args, partitioning, profiling_stages[i])
         
         process = subprocess.Popen(cmd, env=current_env, stdout=sys.stdout, stderr=sys.stdout)
         processes.append(process)
@@ -90,7 +84,3 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     main(args)
-    # partitionings = get_varuna_partitionings(48)
-    # print(len(partitionings))
-    # for p in partitionings:
-    #     print(p)

@@ -43,24 +43,6 @@ def evenly_distribute_fill(n_gpus, n_layers, l_per_gpu):
 def fill(n_gpus, l_per_gpu):
     return [l_per_gpu] * n_gpus
 
-def get_trimmed_partitionings(n_layers):
-    if n_layers < 6:
-        raise ValueError("For profiling, n_layers must be >= 2 * n_gpus - 2")
-
-    first_partitioning = [1,1,(n_layers-2)]  # fill to 4 GPUs
-    second_partitioning = [2,1,(n_layers-3)]
-    partitionings = [first_partitioning, second_partitioning]
-
-    for layer in range(1, n_layers - 3):
-        partitioning = [layer,2,1,(n_layers - layer - 3)]
-        partitionings.append(partitioning)
-
-    last_partitioning = [n_layers - 3, 2, 1]
-    partitionings.append(last_partitioning)
-
-    return partitionings
-
-
 def get_mCAP_partitionings(n_gpus, n_layers):
     if n_layers < 2 * n_gpus - 2:
         raise ValueError("For profiling, n_layers must be >= 2 * n_gpus - 2")
@@ -131,14 +113,78 @@ def convert_to_forward_layers(partitionings):
 
     return new_partitionings
 
+# Generates partitionings for a trimmed model.
+# Ensures that at most 2 intact layers are on a GPU at once.
+# Returns a list of partitionings, and a corresponding list of contentful stages to be profiled;
+# stages not listed in profiling_stages are to be trimmed during profiling.
+def get_trimmed_partitionings(n_gpus, n_layers):
+    if n_layers < 6:
+        raise ValueError("For profiling, n_layers must be >= 2 * n_gpus - 2")
+
+    partitionings = []
+    profiling_stages = []
+
+    single_layers = [1 for i in range(n_gpus-1)]
+    single_layers.append(n_layers-(n_gpus-1))
+    partitionings.append(single_layers)
+    profiling_stages.append([i for i in range(n_gpus-1)])
+
+    even_layers = [2 for i in range(n_gpus-1)]
+    even_layers.append(n_layers-sum(even_layers))
+    partitionings.append(even_layers)
+    profiling_stages.append([i for i in range(n_gpus-1)])
+
+    odd_layers = [1]
+    odd_layers.extend(2 for i in range(n_gpus-2))
+    odd_layers.append(n_layers-sum(odd_layers))
+    partitionings.append(odd_layers)
+    profiling_stages.append([i for i in range(1,n_gpus-1)])
+
+    # PARTITIONINGS FOR MEM ISOLATED
+    layers_remaining = single_layers[-1]
+    start = sum(single_layers[:-1])
+    while layers_remaining > 0:
+        end = min(start + (n_gpus-2), n_layers)
+        partitioning = [start]
+        partitioning.extend(1 for i in range(start,end))
+        profiling_stages.append([i for i in range(1,len(partitioning))])
+
+        layers_remaining = n_layers-sum(partitioning)
+        if layers_remaining > 0:
+            partitioning.append(layers_remaining)
+        partitionings.append(partitioning)
+        start = sum(partitioning[:-1])
+
+    # PARTITIONINGS FOR MEM ADDED
+    # Go through both even and odd layers
+    for parity in [even_layers, odd_layers]:
+        layers_remaining = parity[-1]
+        start = sum(parity[:-1])
+        while layers_remaining > 1:
+            end = min(start + 2*(n_gpus-2), n_layers-1)
+            partitioning = [start]
+            partitioning.extend(2 for i in range(start,end,2))
+            profiling_stages.append([i for i in range(1,len(partitioning))])
+
+            layers_remaining = n_layers-sum(partitioning)
+            if layers_remaining > 0:
+                partitioning.append(layers_remaining)
+            partitionings.append(partitioning)
+            start = sum(partitioning[:-1])
+
+    return partitionings, profiling_stages
+
 # Generates profiling partitionings for given n_gpus and n_layers as a test.
 # Then runs a validity check to see if mem isolated and mem added can indeed
 # be extracted from the generated profiling partitionings.
 def main(n_gpus, n_layers):
     print("Predicting for", n_gpus, "gpus and", n_layers, "layers")
-    ps = get_trimmed_partitionings(n_layers)
+    ps, stages = get_trimmed_partitionings(n_gpus, n_layers)
 
-    for p in ps: print(p, sum(p))
+    for i,p in enumerate(ps):
+        print(p, stages[i])
+        assert sum(p) == n_layers
+        assert len(p) <= n_gpus
 
     # Validity check:
     partitionings = convert_to_forward_layers(ps)
@@ -149,8 +195,15 @@ def main(n_gpus, n_layers):
 
     # Put cutpoints and mocked(!) memory results in dict for validity check.
     data = []
-    for p in partitionings:
-        data.append({"partitioning": p, "mem": [0] * len(p)})
+    for i,p in enumerate(partitionings):
+        contentful_stages = stages[i]
+        mem = []
+        for j in range(len(p)):
+            if j in contentful_stages:
+                mem.append(1)
+            else:
+                mem.append(0)
+        data.append({"partitioning": p, "mem": mem})
 
     # Check if indeed al profiling data can be extracted from the generated partitionings.
     print("Running validity check...")
@@ -158,4 +211,4 @@ def main(n_gpus, n_layers):
     do_completeness_check(results, n_layers)
 
 if __name__ == "__main__":
-    main(n_gpus=4, n_layers=48)
+    main(n_gpus=8, n_layers=42)

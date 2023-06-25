@@ -6,7 +6,7 @@ import numpy as np
 from varuna_mem_stats import read_input_varuna
 
 debug = False
-#debug = True
+# debug = True
 plot = False
 global_n_layers = None
 global_mem_stats = None
@@ -138,7 +138,9 @@ def find_mem_isolated(data, layer):
         cutpoints = p["partitioning"]
         # Find a partitioning with cutpoints just before and after 'layer'.
         if layer in cutpoints and layer+1 in cutpoints:
-            results.append(p["mem"][cutpoints.index(layer)])
+            mem = p["mem"][cutpoints.index(layer)]
+            if mem > 0: # if the memory is not from a trimmed stage
+                results.append(mem)
     return results
 
 # Find all partitioning with a cutpoint before 'layer'.
@@ -173,8 +175,10 @@ def find_mem_added(data, layer):
             if e_prev_cut == prev_cut:
                 mem_s = mem[cutpoints.index(layer) - 1]
                 mem_e = e["mem"][e["partitioning"].index(layer + 1) - 1]
-                mem_added = mem_e - mem_s
-                results.append(mem_added)
+                # only proceed if neither statistic is from a trimmed stage
+                if mem_s > 0 and mem_e > 0:
+                    mem_added = mem_e - mem_s
+                    results.append(mem_added)
 
     return results
 
@@ -188,7 +192,7 @@ def get_mem_stats(data, n_layers):
 
         if layer != 0:
             results[layer]["mem_added"] = find_mem_added(data, layer)
-    
+
     return results
 
 # If there are multiple values for mem isolated and mem added for a layer,
@@ -217,10 +221,10 @@ def do_completeness_check(results, n_layers):
             err = 1
 
     if err:
-        print("Profiling data not complete.")
+        print("Profiling data not complete.", flush=True)
         sys.exit()
     else:
-        print("Profiling data OK.")
+        print("Profiling data OK.", flush=True)
 
 # Generate all possible partitionings for the brute-force method.
 def generate_partitionings_recursive(n_layers, n_gpus, partial_result):
@@ -456,7 +460,7 @@ def find_balanced_partitioning(mem_stats, n_layers=24, n_gpus=8, predictor='bf')
         print_bo_result(opt, n_layers, end-start)
 
 def main(slurm_filename, predictor='bf', n_gpus=None):
-    partitionings, mem = read_input_varuna(slurm_filename) #read_input_alpa(slurm_filename)
+    partitionings, mem = read_input_varuna(slurm_filename)
 
     # If no n_gpus given to predict for, use same as in profiling runs.
     if n_gpus is None:
@@ -465,8 +469,6 @@ def main(slurm_filename, predictor='bf', n_gpus=None):
     if debug:
         print_partitionings(partitionings, mem)
 
-    # Convert partitionings to a representation with cutpoints.
-    # partitionings = [partitionings_to_cutpoints(p) for p in partitionings]
     n_layers = partitionings[0][-1]
 
     if debug:
@@ -499,18 +501,17 @@ def main(slurm_filename, predictor='bf', n_gpus=None):
 
 
 if __name__ == "__main__":
-    # if len(sys.argv) < 2:
-    #     print("Usage: python3 calc_mem_stats.py <slurm-<id>.out> <predictor (bf/bo)> <n_gpus (target run)>")
-    #     sys.exit()
+    if len(sys.argv) < 2:
+        print("Usage: python3 calc_mem_stats.py <slurm-<id>.out> <predictor (bf/bo)> <n_gpus (target run)>")
+        sys.exit()
 
     n_gpus = None
     predictor = 'bf'
 
-    # if len(sys.argv) > 2:
-    #     predictor = sys.argv[2]
+    if len(sys.argv) > 2:
+        predictor = sys.argv[2]
 
-    # if len(sys.argv) > 3:
-    #     n_gpus = int(sys.argv[3])
+    if len(sys.argv) > 3:
+        n_gpus = int(sys.argv[3])
 
-    # main(sys.argv[1], predictor, n_gpus)
-    main("ssh_out_49086")
+    main(sys.argv[1], predictor, n_gpus)
