@@ -58,7 +58,7 @@ class CutPoint(Module):
                 dummy_inputs.append(torch.rand(*shape, requires_grad = self.bwd_req_grads[i], dtype=dtype).to(self.device))
             inputs = tuple(dummy_inputs)
 
-        if len(inputs) < 0 or inputs[0] is None:
+        if len(inputs) < 0 or None in inputs:
             if self.pruning:
                 inputs = (torch.tensor([-1.0], requires_grad = True))
                 inputs = (inputs,)
