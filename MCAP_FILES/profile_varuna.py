@@ -1,13 +1,20 @@
 import os, sys, subprocess
 from argparse import ArgumentParser, REMAINDER
-from mcap_utils import get_trimmed_partitionings
+from mcap_utils import get_trimmed_partitionings, get_mCAP_partitionings
+from datetime import datetime
 
-def get_varuna_partitionings(n_layers, n_gpus):
-    mcap_partitionings, profiling_stages = get_trimmed_partitionings(n_gpus, n_layers)
+def get_varuna_partitionings(n_layers, n_gpus, trimmed):
+    if trimmed:
+        mcap_partitionings, profiling_stages = get_trimmed_partitionings(n_gpus, n_layers)
+    else:
+        mcap_partitionings = get_mCAP_partitionings(n_gpus, n_layers)
+        profiling_stages = None
     varuna_partitionings = convert_to_varuna_cutpoints(mcap_partitionings)
 
     for partitioning in varuna_partitionings:
         assert len(partitioning) <= n_gpus, "partitioning must have max n_gpus-many stages"
+
+    print("NUMBER OF PARTITIONINGS: ", len(varuna_partitionings), flush=True)
     
     return varuna_partitionings, profiling_stages
 
@@ -25,7 +32,8 @@ def convert_to_varuna_cutpoints(mcap_partitionings):
 
 def launch_cmd(args, partitioning, contentful_stages):
     stage_to_cut = ','.join(str(p) for p in partitioning)
-    profiling_stages = ','.join(str(s) for s in contentful_stages)
+    if contentful_stages is not None:
+        profiling_stages = ','.join(str(s) for s in contentful_stages)
     num_stages = len(partitioning)
     launch_cmd = [sys.executable]
     launch_cmd.append("-m")
@@ -41,29 +49,42 @@ def launch_cmd(args, partitioning, contentful_stages):
     launch_cmd.append("--manager_ip={}".format(str(args.manager_ip)))
     launch_cmd.append("--code_dir={}".format(str(args.code_dir)))
     launch_cmd.append(args.training_script)
-    launch_cmd.append("--profiling_stages={}".format(str(profiling_stages)))
+    if contentful_stages is not None:
+        launch_cmd.append("--profiling_stages={}".format(str(profiling_stages)))
     launch_cmd.extend(args.training_script_args)
     return launch_cmd
 
 def main(args):
     n_layers = args.n_cutpoints + 1
-    partitionings, profiling_stages = get_varuna_partitionings(n_layers, args.n_gpus)
+    partitionings, profiling_stages = get_varuna_partitionings(n_layers, args.n_gpus, args.trimmed)
 
     current_env = os.environ.copy()
-    processes = []    
+    processes = []
+    
+    start_time = datetime.now()    
     for i, partitioning in enumerate(partitionings):
-        cmd = launch_cmd(args, partitioning, profiling_stages[i])
+        if args.trimmed:
+            stages = profiling_stages[i]
+        else:
+            stages = None
+
+        cmd = launch_cmd(args, partitioning, stages)
         
         process = subprocess.Popen(cmd, env=current_env, stdout=sys.stdout, stderr=sys.stdout)
         processes.append(process)
         process.wait()
         print("Process done with return code", process.returncode)
-        
+    end_time = datetime.now()
+    
+    execution_time = end_time - start_time
+    print("END-TO-END PROFILING TIME: ", execution_time)
+
 def parse_args():
     parser = ArgumentParser()
 
     parser = ArgumentParser(description="mCAP profiler for Varuna framework")
     parser.add_argument("--job_id", type=str, default=None, help= "SLURM job ID.")
+    parser.add_argument("--trimmed", required=False, action="store_true", help = "Use model trimming in profiling.")
     parser.add_argument('--n_gpus', type=int, default=8, help = "number of GPUs to profile for")
     parser.add_argument('--n_cutpoints', type=int, default=24, help = "number of Varuna cutpoints in the model")
     parser.add_argument("--machine_list", type=str, help = "path to a file with reachable IPs written line-wise.")
