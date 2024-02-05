@@ -2,7 +2,7 @@
 
 This is the implementation of CAPSlog on Varuna. This repository contains:
 - A fork of the original Varuna implementation.
-- An improvements to Varuna to make it more generic.
+- Several improvements to Varuna.
 - An implementation of CAPSlog for Varuna. The CAPSlog-specific files are located in capslog/. 
 
 The modified version of Varuna can be installed and run following the instructions in the original Varuna repository (the original readme follows after this).
