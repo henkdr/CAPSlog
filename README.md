@@ -1,3 +1,13 @@
+# _CAPSlog_
+
+This is the implementation of CAPSlog on Varuna. This repository contains:
+- A fork of the original Varuna implementation.
+- An improvements to Varuna to make it more generic.
+- An implementation of CAPSlog for Varuna. The CAPSlog-specific files are located in capslog/. 
+
+The modified version of Varuna can be installed and run following the instructions in the original Varuna repository (the original readme follows after this).
+More detailed instructions on how to use CAPSlog's partitioning method will follow soon.
+
 # _Varuna_
 
 _Varuna_ is a tool for efficient training of large DNN models on commodity GPUs and networking. It implements a combination of pipeline parallelism and data parallelism in PyTorch, and enables training on a changing set of resources smoothly.

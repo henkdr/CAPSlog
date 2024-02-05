@@ -138,6 +138,7 @@ def find_mem_isolated(data, layer):
         cutpoints = p["partitioning"]
         # Find a partitioning with cutpoints just before and after 'layer'.
         if layer in cutpoints and layer+1 in cutpoints:
+            # print(layer)
             mem = p["mem"][cutpoints.index(layer)]
             if mem > 0: # if the memory is not from a trimmed stage
                 results.append(mem)
@@ -185,6 +186,11 @@ def find_mem_added(data, layer):
 # Determine mem isolated and mem added for all layers based on the profiling partitionings.
 # Multiple results can exist for each layer.
 def get_mem_stats(data, n_layers):
+    # print(n_layers)
+    # print(data)
+    # import json
+    # print(json.dumps(data, sort_keys=True, indent=4))
+    
     results = {}
     for layer in range(n_layers):
         results[layer] = {"mem_isolated": None, "mem_added": None}
@@ -429,7 +435,7 @@ def find_balanced_partitioning(mem_stats, n_layers=24, n_gpus=8, predictor='bf')
         # Print the result.
         print_bf_result(results, best_i, end-start)
 
-    else:
+    elif predictor == "bo":
         # Bayesian optimization:
         # This uses predict_bo function, which we cannot give arguments, so use global variables.
         global global_n_layers
@@ -459,20 +465,176 @@ def find_balanced_partitioning(mem_stats, n_layers=24, n_gpus=8, predictor='bf')
         # Print the result.
         print_bo_result(opt, n_layers, end-start)
 
+    elif predictor == "bs":
+        start = time.time()
+        l, r = 0, 2**60 # binary search
+        # try to load memory on gpus in the begining, if there is a tie
+        while l <= r:
+            mid = (l + r) // 2
+            layers, pred = fill_first(mem_stats, n_gpus, mid)
+            peak = max(pred)
+            if peak > mid:
+                l = mid + 1
+            else:
+                r = mid - 1
+                partitioning = layers
+                prediction = pred
+
+        end = time.time()
+        print_predictor_result(partitioning, prediction, max(prediction), end-start)
+
+    elif predictor == "bs_tb":
+        start = time.time()
+        partitioning, prediction = bs_tb(mem_stats, n_gpus)
+        end = time.time()
+
+        partitioning = reset_layers(partitioning)
+        print_predictor_result(partitioning, prediction, max(prediction), end-start)
+
+    else:
+        raise NotImplementedError
+
+    # return partitioning
+
+def fill_first(mem_stats, n_gpus, threshold):
+    partitioning, prediction = [], []
+    pos = 0
+    n_layers = len(mem_stats)
+
+    # first k-1 layers
+    for gpu_id in range(n_gpus-1):
+        mem = mem_stats[pos]["mem_isolated"]
+        stage = [pos]
+        pos += 1
+        while pos < n_layers + gpu_id - n_gpus + 1:
+            mem_pos = mem_stats[pos]["mem_added"]
+
+            if mem + mem_pos <= threshold:
+                mem += mem_pos
+                stage.append(pos)
+                pos += 1
+            else:
+                break
+        partitioning.append(stage)
+        prediction.append(mem)
+
+    # last layer
+    partitioning.append(list(range(pos, n_layers)))
+    mem = mem_stats[pos]["mem_isolated"]
+
+    for i in range(pos+1, n_layers):
+        mem += mem_stats[i]["mem_added"]
+    prediction.append(mem)
+    
+    return partitioning, prediction
+
+def slice_mem_stats(mem_stats, layers):
+    new_mem_stats = {}
+    for i, layer in enumerate(layers):
+        new_mem_stats[i] = mem_stats[layer]
+    return new_mem_stats
+
+def reset_layers(partitioning):
+    counter = 0
+    for i, gpu in enumerate(partitioning):
+        for j, layer in enumerate(gpu):
+            partitioning[i][j] = counter
+            counter += 1
+
+    return partitioning
+
+def reset_layer_numbers(partitioning, prediction, mem_stats, starting_layer):
+
+    for i, gpu in enumerate(partitioning):
+        partitioning[i] = [layer + starting_layer for layer in gpu]
+
+
+    for i in list(mem_stats.keys()):
+        mem_stats[i+starting_layer] = mem_stats.pop(i)
+
+    return partitioning, prediction, mem_stats
+
+def fix_and_continue(mem_stats, partitioning, prediction):
+
+    n_gpus = len(partitioning)
+    if n_gpus == 0:
+        return [], []
+
+    fix = np.argmax(prediction)
+    fixed_layers = partitioning[fix]
+    # print("fixing GPU", fix, "with layers", fixed_layers)
+
+    layers = np.arange(partitioning[0][0], fixed_layers[0])
+    # print("layers part 1:", layers, "\n")
+    if len(layers) == 0:
+        partitioning1, prediction1 = [], []
+    else:
+        new_mem_stats = slice_mem_stats(mem_stats, layers)
+        # print(new_mem_stats)
+        partitioning1, prediction1 = bs_tb(new_mem_stats, fix)
+
+    layers = np.arange(fixed_layers[-1] + 1, len(mem_stats))
+    # print("layers part 2:", layers, "\n")
+
+    if len(layers) == 0:
+        partitioning2, prediction2 = [], []
+    else:
+        new_mem_stats = slice_mem_stats(mem_stats, layers)
+        # print(new_mem_stats)
+        partitioning2, prediction2 = bs_tb(new_mem_stats, n_gpus - fix - 1, layers[0])
+
+    partitioning = partitioning1 + [fixed_layers] + partitioning2
+    prediction = prediction1 + [prediction[fix]] + prediction2
+
+    return partitioning, prediction
+
+
+def bs_tb(mem_stats, n_gpus, start_layer=0):
+    l, r = 0, 2**60 # binary search
+    # try to load memory on gpus in the begining, if there is a tie
+    while l <= r:
+        mid = (l + r) // 2
+        layers, pred = fill_first(mem_stats, n_gpus, mid)
+        peak = max(pred)
+        if peak > mid:
+            l = mid + 1
+        else:
+            r = mid - 1
+            partitioning = layers
+            prediction = pred
+
+    # if start_layer != 0:
+        # partitioning, prediction, mem_stats = reset_layer_numbers(partitioning, prediction, mem_stats, start_layer)
+
+    return fix_and_continue(mem_stats, partitioning, prediction)
+
+    # return partitioning, prediction
+
 def main(slurm_filename, predictor='bf', n_gpus=None):
     partitionings, mem = read_input_varuna(slurm_filename)
-
+    # print(partitionings[0])
     # If no n_gpus given to predict for, use same as in profiling runs.
     if n_gpus is None:
-        n_gpus = len(partitionings[0])
-    
+        n_gpus = len(partitionings[0]) - 1
+    # print(n_gpus)
+
     if debug:
         print_partitionings(partitionings, mem)
 
     n_layers = partitionings[0][-1]
+    if n_layers == 1:
+        n_layers = partitionings[-1][-2]+1
+    if n_layers == 41:
+        n_layers = 42# TODO: un-hardcode!
+
+    for p in partitionings:
+        if p[-1] == 1:
+            p[-1] = n_layers
+    # print(n_layers)
 
     if debug:
         print_partitionings(partitionings, mem)
+        # sys.exit()
 
     # Put cutpoints and memory results in a dict.
     profiling_data = []
@@ -498,11 +660,12 @@ def main(slurm_filename, predictor='bf', n_gpus=None):
 
     # Find the best memory-balanced partitioning for training on n_gpus gpus.
     find_balanced_partitioning(results, n_layers, n_gpus, predictor)
+    # binary_search_find_balanced_partitioning(results, n_layers, n_gpus, predictor)
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python3 calc_mem_stats.py <slurm-<id>.out> <predictor (bf/bo)> <n_gpus (target run)>")
+        print("Usage: python3 calc_mem_stats.py <slurm-<id>.out> <predictor (bf/bo/bs/bs_tb)> <n_gpus (target run)>")
         sys.exit()
 
     n_gpus = None
